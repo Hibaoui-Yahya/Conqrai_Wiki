@@ -44,17 +44,29 @@ const DELIVERY_RELATIONS = new Set<string>([
 /**
  * Map each Plane work-item URN to the project recorded on its relationship.
  *
- * `metadata.target_project_id` is written when the link is created. It is the
- * only place the project survives, because the URN deliberately does not carry
- * it - a work item that moves project keeps its identity.
+ * The project is written as `metadata.target_project_id` when the link is
+ * created, and it is the only place the project survives - the URN
+ * deliberately does not carry it, so a work item that moves project keeps its
+ * identity.
+ *
+ * It is read back under *both* spellings on purpose. Kysely's
+ * `CamelCasePlugin` maps column names, but it also recurses into plain object
+ * values, so a `jsonb` column written as `{target_project_id: ...}` arrives in
+ * application code as `{targetProjectId: ...}`. Reading only the name it was
+ * written under found nothing, and the caller then fell back to "no project",
+ * which is indistinguishable from ConqrPlan being unreachable. Accepting both
+ * also means rows written before or after any plugin change keep working.
  */
 export function projectByUrnFromEdges(
   edges: { sourceUrn: string; targetUrn: string; metadata?: unknown }[],
 ): Record<string, string> {
   const byUrn: Record<string, string> = {};
   for (const edge of edges) {
-    const projectId = (edge.metadata as { target_project_id?: unknown } | null)
-      ?.target_project_id;
+    const metadata = edge.metadata as {
+      target_project_id?: unknown;
+      targetProjectId?: unknown;
+    } | null;
+    const projectId = metadata?.targetProjectId ?? metadata?.target_project_id;
     if (typeof projectId !== 'string' || !projectId) continue;
     for (const urn of [edge.sourceUrn, edge.targetUrn]) {
       if (urn.startsWith('conqr://plane/work-item/')) byUrn[urn] = projectId;

@@ -1,4 +1,4 @@
-import { TraceabilityService } from './traceability.service';
+import { TraceabilityService, projectByUrnFromEdges } from './traceability.service';
 import { ResolutionState } from '../domain/presentation.types';
 
 const pageUrn = 'conqr://hub/page/p1';
@@ -82,5 +82,48 @@ describe('TraceabilityService.pageCoverage', () => {
     const res = await service.pageCoverage('ws1', pageUrn, 'u1');
     expect(res.totalLinkedWork).toBe(0);
     expect(resolver.resolveMany).toHaveBeenCalledWith([], expect.anything());
+  });
+});
+
+/**
+ * Kysely's CamelCasePlugin recurses into plain object values, so a jsonb
+ * column written as `{target_project_id: ...}` comes back as
+ * `{targetProjectId: ...}`. Reading only the written spelling silently found
+ * nothing, and every linked work item then resolved as `source_unavailable`.
+ */
+describe('projectByUrnFromEdges', () => {
+  const WORK = 'conqr://plane/work-item/wi-1';
+  const PAGE = 'conqr://hub/page/page-1';
+
+  it('reads the camelCase spelling the database driver actually returns', () => {
+    const map = projectByUrnFromEdges([
+      { sourceUrn: PAGE, targetUrn: WORK, metadata: { targetProjectId: 'proj-1' } },
+    ]);
+    expect(map).toEqual({ [WORK]: 'proj-1' });
+  });
+
+  it('still reads the snake_case spelling the link was written under', () => {
+    const map = projectByUrnFromEdges([
+      { sourceUrn: PAGE, targetUrn: WORK, metadata: { target_project_id: 'proj-1' } },
+    ]);
+    expect(map).toEqual({ [WORK]: 'proj-1' });
+  });
+
+  it('keys the work item, not the page', () => {
+    const map = projectByUrnFromEdges([
+      { sourceUrn: WORK, targetUrn: PAGE, metadata: { targetProjectId: 'proj-1' } },
+    ]);
+    expect(map).toEqual({ [WORK]: 'proj-1' });
+    expect(map[PAGE]).toBeUndefined();
+  });
+
+  it('ignores an edge with no usable project', () => {
+    expect(
+      projectByUrnFromEdges([
+        { sourceUrn: PAGE, targetUrn: WORK, metadata: null },
+        { sourceUrn: PAGE, targetUrn: WORK, metadata: { targetProjectId: 42 } },
+        { sourceUrn: PAGE, targetUrn: WORK, metadata: { targetProjectId: '' } },
+      ]),
+    ).toEqual({});
   });
 });
