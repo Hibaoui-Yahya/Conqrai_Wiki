@@ -140,3 +140,83 @@ describe('SmartObjectResolverService', () => {
     expect(getWorkItem).toHaveBeenCalledTimes(1); // deduped → one call
   });
 });
+
+
+/**
+ * A page's space maps to at most one ConqrPlan project, but the work linked
+ * from that page does not have to live in it - and a page in an unmapped space
+ * has no project at all. Those items used to report `source_unavailable`, a
+ * generic failure indistinguishable from ConqrPlan being down, when the truth
+ * was often "deleted" or an ordinary readable work item.
+ */
+describe('SmartObjectResolverService — per-URN project', () => {
+  const URN = 'conqr://plane/work-item/wi-1';
+
+  function withClient(getWorkItem: jest.Mock) {
+    return { service: makeResolver({ getWorkItem }), getWorkItem };
+  }
+
+  it('uses the project recorded on the relationship over the space mapping', async () => {
+    const { service, getWorkItem } = withClient(
+      jest.fn().mockResolvedValue({ id: 'wi-1', name: 'Charge API', state: null }),
+    );
+
+    await service.resolveMany([URN], {
+      workspaceId: 'ws-1',
+      viewerId: 'user-1',
+      planeProjectId: 'project-from-space-mapping',
+      planeProjectByUrn: { [URN]: 'project-from-relationship' },
+    });
+
+    expect(getWorkItem).toHaveBeenCalledWith(
+      'project-from-relationship',
+      'wi-1',
+      expect.anything(),
+    );
+  });
+
+  it('falls back to the space mapping when the edge recorded no project', async () => {
+    const { service, getWorkItem } = withClient(
+      jest.fn().mockResolvedValue({ id: 'wi-1', name: 'x', state: null }),
+    );
+
+    await service.resolveMany([URN], {
+      workspaceId: 'ws-1',
+      viewerId: 'user-1',
+      planeProjectId: 'project-from-space-mapping',
+      planeProjectByUrn: {},
+    });
+
+    expect(getWorkItem).toHaveBeenCalledWith(
+      'project-from-space-mapping',
+      'wi-1',
+      expect.anything(),
+    );
+  });
+
+  it('resolves a soft-deleted work item as deleted, not a generic failure', async () => {
+    const { service } = withClient(
+      jest.fn().mockRejectedValue(new PlaneApiError('not found', 404, false)),
+    );
+
+    const [model] = await service.resolveMany([URN], {
+      workspaceId: 'ws-1',
+      viewerId: 'user-1',
+      planeProjectByUrn: { [URN]: 'project-from-relationship' },
+    });
+
+    expect(model.state).toBe(ResolutionState.Deleted);
+  });
+
+  it('still reports source_unavailable when no project is known at all', async () => {
+    const { service, getWorkItem } = withClient(jest.fn());
+
+    const [model] = await service.resolveMany([URN], {
+      workspaceId: 'ws-1',
+      viewerId: 'user-1',
+    });
+
+    expect(model.state).toBe(ResolutionState.SourceUnavailable);
+    expect(getWorkItem).not.toHaveBeenCalled();
+  });
+});

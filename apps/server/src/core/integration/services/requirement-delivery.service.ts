@@ -32,6 +32,7 @@ import {
   unresolvedFrom,
 } from '../domain/requirement-coverage';
 import { APPROVED_OR_BEYOND } from '../domain/requirement-lifecycle';
+import { projectByUrnFromEdges } from './traceability.service';
 
 /**
  * Vertical Slice 01: requirement → linked ConqrPlan execution.
@@ -192,6 +193,7 @@ export class RequirementDeliveryService {
     // A page with twenty requirements would otherwise make twenty round trips
     // to another product on every render.
     const perRequirement: Array<{ row: any; urn: string; workUrns: string[] }> = [];
+    const planeProjectByUrn: Record<string, string> = {};
     for (const req of rows) {
       const urn = RequirementDeliveryService.requirementUrn(
         req.pageId,
@@ -207,6 +209,7 @@ export class RequirementDeliveryService {
         )
         .map((e) => e.targetUrn);
       perRequirement.push({ row: req, urn, workUrns });
+      Object.assign(planeProjectByUrn, projectByUrnFromEdges(edges));
     }
 
     const allWorkUrns = Array.from(
@@ -217,6 +220,7 @@ export class RequirementDeliveryService {
           workspaceId: params.workspaceId,
           viewerId: params.viewerId,
           planeProjectId: projectId ?? undefined,
+          planeProjectByUrn,
         })
       : [];
     const byUrn = new Map(resolved.map((r) => [r.urn, r]));

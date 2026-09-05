@@ -40,6 +40,29 @@ const DELIVERY_RELATIONS = new Set<string>([
  * Scoped to what's computable today: full "approved requirements with no work"
  * needs the requirement-block lifecycle (§6.2), which is not yet built.
  */
+
+/**
+ * Map each Plane work-item URN to the project recorded on its relationship.
+ *
+ * `metadata.target_project_id` is written when the link is created. It is the
+ * only place the project survives, because the URN deliberately does not carry
+ * it - a work item that moves project keeps its identity.
+ */
+export function projectByUrnFromEdges(
+  edges: { sourceUrn: string; targetUrn: string; metadata?: unknown }[],
+): Record<string, string> {
+  const byUrn: Record<string, string> = {};
+  for (const edge of edges) {
+    const projectId = (edge.metadata as { target_project_id?: unknown } | null)
+      ?.target_project_id;
+    if (typeof projectId !== 'string' || !projectId) continue;
+    for (const urn of [edge.sourceUrn, edge.targetUrn]) {
+      if (urn.startsWith('conqr://plane/work-item/')) byUrn[urn] = projectId;
+    }
+  }
+  return byUrn;
+}
+
 @Injectable()
 export class TraceabilityService {
   constructor(
@@ -72,10 +95,16 @@ export class TraceabilityService {
     }
 
     const urns = Array.from(workUrns);
+    // Each edge records the project its work item lives in. Use it: the page's
+    // own space may map to a different project, or to none at all, and without
+    // a project the item cannot be looked up and reports a generic failure
+    // instead of its real state.
+    const planeProjectByUrn = projectByUrnFromEdges(edges);
     const models = await this.resolver.resolveMany(urns, {
       workspaceId,
       viewerId,
       planeProjectId,
+      planeProjectByUrn,
     });
 
     const items: CoverageItem[] = models.map((m) => ({

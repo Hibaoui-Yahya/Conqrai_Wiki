@@ -16,6 +16,19 @@ export interface ResolveContext {
   viewerId: string;
   /** Needed for Plane work items — their API is project-scoped. */
   planeProjectId?: string;
+  /**
+   * Per-URN project override, keyed by work-item URN.
+   *
+   * A page's space maps to at most one ConqrPlan project, but the work items
+   * linked from that page do not all have to live in it - and a page in an
+   * unmapped space has no project at all. Falling back to the single
+   * `planeProjectId` meant those items were never looked up: resolution
+   * returned `source_unavailable`, a generic failure, for work that was
+   * perfectly readable and sometimes simply deleted. The relationship already
+   * records which project its target is in, so callers that hold the edge
+   * should pass it here.
+   */
+  planeProjectByUrn?: Record<string, string>;
   displayMode?: DisplayMode;
   locale?: string;
 }
@@ -97,7 +110,8 @@ export class SmartObjectResolverService {
         deepLink: this.planeDeepLink(type, id, ctx.planeProjectId),
       };
     }
-    if (!ctx.planeProjectId) {
+    const projectId = ctx.planeProjectByUrn?.[urn] ?? ctx.planeProjectId;
+    if (!projectId) {
       // Cannot locate a project-scoped item without its project.
       return { urn, state: ResolutionState.SourceUnavailable };
     }
@@ -109,7 +123,7 @@ export class SmartObjectResolverService {
       // its title, state and assignees. Delegating makes the 403 below a real
       // permission decision about *this* person.
       const item = await this.planeClient.getWorkItem(
-        ctx.planeProjectId,
+        projectId,
         id,
         this.viewerContext(ctx),
       );
@@ -118,7 +132,7 @@ export class SmartObjectResolverService {
       // where a human expects "In Progress". Resolve it to a name, and show
       // nothing rather than an id when the lookup fails.
       const stateName = await this.stateName(
-        ctx.planeProjectId,
+        projectId,
         item.state_detail?.name,
         typeof item.state === 'string' ? item.state : null,
         ctx,
@@ -141,7 +155,7 @@ export class SmartObjectResolverService {
           startDate: item.start_date ?? null,
           completed: Boolean(item.completed_at),
         },
-        deepLink: this.planeDeepLink('work-item', id, ctx.planeProjectId),
+        deepLink: this.planeDeepLink('work-item', id, projectId),
         sourceVersion: item.updated_at,
         lastRefreshedAt: new Date().toISOString(),
         actions: [
