@@ -377,6 +377,34 @@ when a deployment finishes.
 A dual-secret verification window in ConqrHub would remove the gap entirely.
 It does not exist today.
 
+## 7d. Backlog: reconciliation does not discover a missing create
+
+Reconciliation repairs *stale* projections. It starts from the rows that
+exist - `workspacesWithProjections()`, then `findStale()` - so a work item
+whose **first** delivery was lost has no row to find and is never repaired by
+the sweep. It is repaired only the next time somebody opens the page, by the
+read path's live fallback.
+
+That is invisible in normal operation, which is why it is written down here
+rather than left to be rediscovered: the card looks right to whoever opens the
+page, so the missing row is never noticed, and any consumer that reads the
+projection directly rather than through the read path sees nothing at all.
+
+**Backlog item — discover missing projections.** Acceptance criteria:
+
+- Given an active relationship to a ConqrPlan work item with no row in
+  `integration_work_item_status`, a scheduled sweep creates one.
+- It resolves as the relationship's creator, exactly as the stale path does,
+  and skips rather than escalating when no actor can be resolved.
+- It is bounded per run and per workspace, and holds the same single-run lock
+  as the existing sweep.
+- A work item that is deleted or restricted in the source does not produce a
+  row that asserts otherwise.
+- Running it twice changes nothing the second time.
+
+Deliberately not in scope of the delivery fix: it is a reconciliation change,
+not a webhook change, and the webhook path is now correct on its own.
+
 ## 8. Known limits
 
 - The webhook leg is unproven (§5). Production has recorded **zero** webhook
