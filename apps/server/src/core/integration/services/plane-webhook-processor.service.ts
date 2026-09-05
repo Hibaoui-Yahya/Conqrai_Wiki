@@ -15,6 +15,49 @@ export interface ParsedPlaneEvent {
   data?: { id?: string; project?: string; [k: string]: unknown };
 }
 
+/**
+ * The work item's state, from whichever shape the payload uses.
+ *
+ * ConqrPlan expresses this two ways and they are not interchangeable. Its REST
+ * API expands the state into `state_detail` and leaves `state` a bare uuid;
+ * its *webhook* payload has no `state_detail` at all and sends `state` as the
+ * expanded object `{id, name, color, group}`.
+ *
+ * This code was written against the REST shape, so on a webhook `state_detail`
+ * was undefined and the fallback only accepted a string - and an object is not
+ * a string. Both fields therefore came back null on every delivery, and the
+ * projection silently never recorded state at all. It looked healthy: title
+ * and timestamps updated, the card still showed the right state, because the
+ * read path quietly fell back to a live call. The cache existed and held
+ * nothing.
+ *
+ * A bare uuid is kept as a last resort. It is a poor label, but it is a true
+ * one, and `stateName()` in the resolver turns it into a name.
+ */
+export function planeState(data: Record<string, unknown> | undefined): {
+  state: string | null;
+  stateGroup: string | null;
+} {
+  const raw = data?.['state'];
+  const expanded =
+    (data?.['state_detail'] as { name?: unknown; group?: unknown } | undefined) ??
+    (raw && typeof raw === 'object'
+      ? (raw as { name?: unknown; group?: unknown })
+      : undefined);
+
+  const name = expanded?.name;
+  const group = expanded?.group;
+  return {
+    state:
+      typeof name === 'string' && name
+        ? name
+        : typeof raw === 'string' && raw
+          ? raw
+          : null,
+    stateGroup: typeof group === 'string' && group ? group : null,
+  };
+}
+
 export interface ProcessResult {
   affectedWorkspaces: number;
   subject?: string;
@@ -117,12 +160,7 @@ export class PlaneWebhookProcessorService {
           workItemUrn: subject,
           planeProjectId: payload.data.project ? String(payload.data.project) : null,
           title: (payload.data as any).name ?? null,
-          state:
-            (payload.data as any).state_detail?.name ??
-            (typeof (payload.data as any).state === 'string'
-              ? (payload.data as any).state
-              : null),
-          stateGroup: (payload.data as any).state_detail?.group ?? null,
+          ...planeState(payload.data),
           completed: Boolean((payload.data as any).completed_at),
           deletedInSource: isDelete,
           sourceUpdatedAt: (payload.data as any).updated_at ?? null,
