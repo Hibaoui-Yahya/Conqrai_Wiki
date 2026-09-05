@@ -73,7 +73,13 @@ export class DeliveryReadService {
    */
   async resolveMany(
     urns: string[],
-    ctx: { workspaceId: string; viewerId: string; planeProjectId?: string },
+    ctx: {
+      workspaceId: string;
+      viewerId: string;
+      planeProjectId?: string;
+      /** Per-URN project, from the relationship that recorded the link. */
+      planeProjectByUrn?: Record<string, string>;
+    },
     opts: { now?: Date; forceLive?: boolean } = {},
   ): Promise<ResolvedDelivery[]> {
     if (!urns.length) return [];
