@@ -263,6 +263,30 @@ that reads them.
 
 ---
 
+### Webhook-specific rollback, by id
+
+Target the exact resources this release created. A `LIKE '%conqrhub%'` or
+label match would also hit any other integration that happens to point at the
+same host, which is precisely the kind of blast radius a rollback should not
+have.
+
+```sql
+-- Stop deliveries (ConqrPlan). By id, not by url pattern.
+UPDATE webhooks SET is_active = false
+WHERE id = '459221b9-9ae6-41f4-965b-1ecdb74c5285';
+
+-- Restore
+UPDATE webhooks SET is_active = true
+WHERE id = '459221b9-9ae6-41f4-965b-1ecdb74c5285';
+```
+
+Unsetting `PLANE_WEBHOOK_SECRET` on the ConqrHub service is the receiver-side
+kill switch: ConqrHub then answers `200 integration_disabled` and drops
+deliveries without processing them. That is deliberately a 2xx, so ConqrPlan
+does not retry and does not auto-disable the webhook while the integration is
+intentionally off.
+
+
 ## 7b. What production actually runs (2026-09-05)
 
 The cutover is done. Recorded here so the next operator does not have to
@@ -301,6 +325,57 @@ One thing to expect when reading the audit table: only endpoints that require
 a delegation write rows. `GET /projects/` does not, so a project listing
 carries a delegation but leaves no audit row. Absence of a row is not absence
 of a delegation.
+
+## 7c. Rotating the webhook secret
+
+**A rejected delivery is not retried, and it is not recoverable from the
+inbox.** Two facts combine badly and both need to be understood before
+rotating anything:
+
+1. ConqrPlan retries only `429` and `5xx`. A `401` is a 4xx - permanent by
+   design, because a delivery rejected for a bad secret does not get better by
+   being sent five more times, and retrying it would auto-disable the webhook.
+2. ConqrHub verifies the signature *before* writing the inbox row. A rejected
+   delivery therefore leaves no inbox record, so there is nothing to
+   dead-letter and nothing for administrative replay to act on.
+
+An earlier version of this runbook claimed in-flight deliveries would be
+redelivered after a rotation. They are not. They are lost.
+
+ConqrHub holds exactly one secret and has no dual-secret window, so the gap
+between updating the two sides is a window in which every delivery is dropped
+silently.
+
+### The procedure
+
+```
+1. Pick a quiet moment. Anything ConqrPlan emits between steps 2 and 3 is lost.
+2. Set PLANE_WEBHOOK_SECRET on the ConqrHub service; wait for it to redeploy
+   and report healthy.
+3. Update the webhook row's secret_key to the same value, by id.
+4. Make one harmless change to a canary work item and confirm a 200 in
+   ConqrPlan's WebhookLog and a matching inbox row in ConqrHub.
+```
+
+Steps 2 and 3 are the wrong way round on purpose. Rotating ConqrPlan first
+means every delivery is rejected until ConqrHub catches up; rotating ConqrHub
+first means the same, so neither order avoids the gap - but this order leaves
+the *receiver* ready, so the gap ends the instant step 3 lands rather than
+when a deployment finishes.
+
+### Recovering what the gap dropped
+
+- A missed **update** to work already linked is repaired by reconciliation
+  within ~15 minutes, because a projection row already exists to refresh.
+- A missed **create** is not. Reconciliation only refreshes existing
+  projection rows, so a link whose first event was dropped has no row to
+  refresh; it is repaired the next time somebody reads the page, by the read
+  path's live fallback.
+- Administrative replay cannot help with either: it operates on inbox rows,
+  and a rejected delivery never created one.
+
+A dual-secret verification window in ConqrHub would remove the gap entirely.
+It does not exist today.
 
 ## 8. Known limits
 
