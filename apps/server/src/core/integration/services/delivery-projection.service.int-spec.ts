@@ -113,6 +113,54 @@ describe('status projection', () => {
   });
 });
 
+describe('partial updates and unresolved state', () => {
+  it('an update that says nothing about state keeps the stored state', async () => {
+    await service.apply(update());
+
+    // A rename or priority change carries no state. `undefined` must leave the
+    // stored value alone - erasing it would blank the card for an unrelated
+    // edit, which is how the projection silently lost state before.
+    const outcome = await service.apply(
+      update({
+        title: 'Implement login (renamed)',
+        state: undefined,
+        stateGroup: undefined,
+        sourceUpdatedAt: '2026-09-04T12:00:00Z',
+        deliveryId: 'delivery-partial',
+      }),
+    );
+
+    expect(outcome).toEqual({ applied: true, reason: 'updated' });
+    expect(await service.get(workspaceId, URN)).toMatchObject({
+      title: 'Implement login (renamed)',
+      state: 'In Progress',
+      stateGroup: 'started',
+    });
+  });
+
+  it('a state we cannot render clears the name instead of leaving a stale one', async () => {
+    await service.apply(update());
+
+    // The item moved, but the delivery carried only an id. Showing "In
+    // Progress" would assert something we no longer know to be true.
+    const outcome = await service.apply(
+      update({
+        state: null,
+        stateGroup: null,
+        sourceUpdatedAt: '2026-09-04T13:00:00Z',
+        deliveryId: 'delivery-unresolved',
+      }),
+    );
+
+    expect(outcome).toEqual({ applied: true, reason: 'updated' });
+    const stored = await service.get(workspaceId, URN);
+    expect(stored?.state).toBeNull();
+    expect(stored?.stateGroup).toBeNull();
+    // Everything else survives; only the unrenderable field is cleared.
+    expect(stored).toMatchObject({ title: 'Implement login' });
+  });
+});
+
 // ===========================================================================
 // 8. Duplicate delivery changes nothing after the first
 // ===========================================================================

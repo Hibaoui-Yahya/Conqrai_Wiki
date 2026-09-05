@@ -1,4 +1,8 @@
-import { PlaneWebhookProcessorService, planeState } from './plane-webhook-processor.service';
+import {
+  PlaneWebhookProcessorService,
+  normalizePlaneState,
+  stateFieldsFor,
+} from './plane-webhook-processor.service';
 import { EventType } from '../domain/event-envelope';
 
 function make(findResult: any[] = []) {
@@ -140,62 +144,85 @@ describe('PlaneWebhookProcessorService', () => {
   });
 });
 
+
 /**
- * Captured from a real production delivery (CONQR-E2E-CANARY-20260905T232445Z):
- * the webhook payload has no `state_detail` and sends `state` expanded. The
- * REST API does the opposite. Reading only the REST shape meant the projection
- * recorded no state on any delivery, which was invisible because the read path
- * fell back to a live call.
+ * Fixtures below are the real shapes, taken from production deliveries in run
+ * CONQR-E2E-CANARY-20260905T232445Z with identifiers replaced. The webhook
+ * sends `state` expanded and carries no `state_detail`; the REST API does the
+ * opposite. Reading only the REST shape stored null on every delivery, and the
+ * read path's live fallback hid it.
  */
-describe('planeState', () => {
+describe('normalizePlaneState', () => {
+  const WEBHOOK_STATE = {
+    id: 'be8aa62c-0000-0000-0000-000000000001',
+    name: 'Todo',
+    color: '#60646C',
+    group: 'unstarted',
+  };
+
   it('reads the expanded state a webhook actually sends', () => {
-    expect(
-      planeState({
-        state: {
-          id: 'be8aa62c-7ac7-4b56-9a09-3290eb5fde7c',
-          name: 'Todo',
-          color: '#60646C',
-          group: 'unstarted',
-        },
-      }),
-    ).toEqual({ state: 'Todo', stateGroup: 'unstarted' });
-  });
-
-  it('reads the REST shape, where state_detail is expanded and state is a uuid', () => {
-    expect(
-      planeState({
-        state: 'be8aa62c-7ac7-4b56-9a09-3290eb5fde7c',
-        state_detail: { name: 'Todo', group: 'unstarted' },
-      }),
-    ).toEqual({ state: 'Todo', stateGroup: 'unstarted' });
-  });
-
-  it('prefers state_detail when a payload somehow carries both', () => {
-    expect(
-      planeState({
-        state: { name: 'Stale', group: 'backlog' },
-        state_detail: { name: 'Todo', group: 'unstarted' },
-      }),
-    ).toEqual({ state: 'Todo', stateGroup: 'unstarted' });
-  });
-
-  it('falls back to a bare uuid rather than losing the state entirely', () => {
-    // A poor label, but a true one, and the resolver maps it to a name.
-    expect(planeState({ state: 'be8aa62c-7ac7-4b56-9a09-3290eb5fde7c' })).toEqual({
-      state: 'be8aa62c-7ac7-4b56-9a09-3290eb5fde7c',
-      stateGroup: null,
+    const result = normalizePlaneState({ state: WEBHOOK_STATE });
+    expect(result).toEqual({
+      kind: 'resolved',
+      id: WEBHOOK_STATE.id,
+      name: 'Todo',
+      group: 'unstarted',
     });
+    expect(stateFieldsFor(result)).toEqual({ state: 'Todo', stateGroup: 'unstarted' });
   });
 
-  it('returns nulls when there is no state at all', () => {
-    expect(planeState({})).toEqual({ state: null, stateGroup: null });
-    expect(planeState(undefined)).toEqual({ state: null, stateGroup: null });
-  });
-
-  it('ignores a non-string name or group instead of writing junk', () => {
-    expect(planeState({ state: { name: 42, group: {} } })).toEqual({
-      state: null,
-      stateGroup: null,
+  it('still reads the REST shape, where state is a uuid beside state_detail', () => {
+    const result = normalizePlaneState({
+      state: 'be8aa62c-0000-0000-0000-000000000001',
+      state_detail: { name: 'Todo', group: 'unstarted' },
     });
+    expect(stateFieldsFor(result)).toEqual({ state: 'Todo', stateGroup: 'unstarted' });
+  });
+
+  it('prefers state_detail when both expanded forms are present', () => {
+    const result = normalizePlaneState({
+      state: { ...WEBHOOK_STATE, name: 'Stale', group: 'backlog' },
+      state_detail: { name: 'Todo', group: 'unstarted' },
+    });
+    expect(stateFieldsFor(result)).toEqual({ state: 'Todo', stateGroup: 'unstarted' });
+  });
+
+  it('never renders a bare state id as the display name', () => {
+    const result = normalizePlaneState({
+      state: 'be8aa62c-0000-0000-0000-000000000001',
+    });
+    expect(result).toEqual({
+      kind: 'unresolved',
+      id: 'be8aa62c-0000-0000-0000-000000000001',
+    });
+    // Cleared, not the uuid and not the previous name.
+    expect(stateFieldsFor(result)).toEqual({ state: null, stateGroup: null });
+  });
+
+  it('leaves stored state alone when the payload says nothing about it', () => {
+    // A priority-only or title-only update must not erase a good value.
+    expect(normalizePlaneState({ name: 'renamed', priority: 'high' })).toEqual({
+      kind: 'absent',
+    });
+    expect(stateFieldsFor({ kind: 'absent' })).toEqual({});
+  });
+
+  it('treats an unreadable state as unresolved rather than guessing', () => {
+    for (const state of [{ name: 42 }, { name: '' }, { group: 'started' }, []]) {
+      const result = normalizePlaneState({ state });
+      expect(result.kind).toBe('unresolved');
+      expect(stateFieldsFor(result)).toEqual({ state: null, stateGroup: null });
+    }
+  });
+
+  it('keeps a resolved name even when no group came with it', () => {
+    const result = normalizePlaneState({ state: { id: 's1', name: 'Todo' } });
+    expect(stateFieldsFor(result)).toEqual({ state: 'Todo', stateGroup: null });
+  });
+
+  it('is absent for an explicitly null state, not unresolved', () => {
+    // Plane omits the key or sends null on payloads that do not touch state.
+    expect(normalizePlaneState({ state: null }).kind).toBe('absent');
+    expect(normalizePlaneState(undefined).kind).toBe('absent');
   });
 });

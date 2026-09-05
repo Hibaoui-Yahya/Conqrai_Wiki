@@ -16,46 +16,91 @@ export interface ParsedPlaneEvent {
 }
 
 /**
- * The work item's state, from whichever shape the payload uses.
+ * What a delivery tells us about the work item's state.
  *
- * ConqrPlan expresses this two ways and they are not interchangeable. Its REST
- * API expands the state into `state_detail` and leaves `state` a bare uuid;
- * its *webhook* payload has no `state_detail` at all and sends `state` as the
- * expanded object `{id, name, color, group}`.
+ * ConqrPlan expresses state two ways and they are not interchangeable. Its
+ * REST API expands the state into `state_detail` and leaves `state` a bare
+ * uuid; its *webhook* payload has no `state_detail` at all and sends `state`
+ * as the expanded object `{id, name, color, group}`.
  *
- * This code was written against the REST shape, so on a webhook `state_detail`
- * was undefined and the fallback only accepted a string - and an object is not
- * a string. Both fields therefore came back null on every delivery, and the
- * projection silently never recorded state at all. It looked healthy: title
- * and timestamps updated, the card still showed the right state, because the
- * read path quietly fell back to a live call. The cache existed and held
- * nothing.
+ * Three outcomes, because "we were not told" and "we were told and cannot read
+ * it" must not collapse into the same answer:
  *
- * A bare uuid is kept as a last resort. It is a poor label, but it is a true
- * one, and `stateName()` in the resolver turns it into a name.
+ * - `absent`     - the payload carried no state. Leave what is stored alone;
+ *                  an unrelated partial update must not erase a good value.
+ * - `resolved`   - a trustworthy display name, and a group when one came with
+ *                  it.
+ * - `unresolved` - a state arrived that we cannot render. The stored name is
+ *                  cleared rather than shown, because it may describe the
+ *                  state the item just left, and a confidently wrong label is
+ *                  worse than a blank one. A uuid is never used as the name.
+ *
+ * Enriching an `unresolved` event by calling ConqrPlan is deliberately not
+ * done here: a webhook has no viewer to act for, so the call would have to run
+ * as the bridge credential. The read path resolves the name as the viewer, and
+ * reconciliation repairs the row.
  */
-export function planeState(data: Record<string, unknown> | undefined): {
-  state: string | null;
-  stateGroup: string | null;
-} {
-  const raw = data?.['state'];
-  const expanded =
-    (data?.['state_detail'] as { name?: unknown; group?: unknown } | undefined) ??
-    (raw && typeof raw === 'object'
-      ? (raw as { name?: unknown; group?: unknown })
-      : undefined);
+export type PlaneStateUpdate =
+  | { kind: 'absent' }
+  | { kind: 'resolved'; id: string | null; name: string; group: string | null }
+  | { kind: 'unresolved'; id: string | null };
 
-  const name = expanded?.name;
-  const group = expanded?.group;
-  return {
-    state:
-      typeof name === 'string' && name
-        ? name
-        : typeof raw === 'string' && raw
-          ? raw
-          : null,
-    stateGroup: typeof group === 'string' && group ? group : null,
-  };
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function readObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * Normalise the state a delivery carries.
+ *
+ * Precedence: `state_detail` wins when both expanded forms are present. It is
+ * the field ConqrPlan's REST API populates deliberately, whereas a `state`
+ * object on the same payload would be the webhook's own shape arriving
+ * alongside it - an ambiguity that should not exist, and if it ever does, the
+ * explicitly-expanded field is the one that was meant.
+ */
+export function normalizePlaneState(
+  data: Record<string, unknown> | undefined,
+): PlaneStateUpdate {
+  if (!data) return { kind: 'absent' };
+
+  const hasState = 'state' in data && data['state'] != null;
+  const hasDetail = 'state_detail' in data && data['state_detail'] != null;
+  if (!hasState && !hasDetail) return { kind: 'absent' };
+
+  const raw = data['state'];
+  const expanded = readObject(data['state_detail']) ?? readObject(raw);
+  const id = readString(expanded?.['id']) ?? readString(raw);
+
+  const name = readString(expanded?.['name']);
+  if (!name) return { kind: 'unresolved', id };
+
+  return { kind: 'resolved', id, name, group: readString(expanded?.['group']) };
+}
+
+/**
+ * The state fields to hand to the projection.
+ *
+ * `undefined` leaves the stored value untouched; `null` clears it. The
+ * distinction is the whole point - see {@link PlaneStateUpdate}.
+ */
+export function stateFieldsFor(update: PlaneStateUpdate): {
+  state?: string | null;
+  stateGroup?: string | null;
+} {
+  switch (update.kind) {
+    case 'absent':
+      return {};
+    case 'resolved':
+      return { state: update.name, stateGroup: update.group };
+    case 'unresolved':
+      return { state: null, stateGroup: null };
+  }
 }
 
 export interface ProcessResult {
@@ -160,7 +205,7 @@ export class PlaneWebhookProcessorService {
           workItemUrn: subject,
           planeProjectId: payload.data.project ? String(payload.data.project) : null,
           title: (payload.data as any).name ?? null,
-          ...planeState(payload.data),
+          ...stateFieldsFor(normalizePlaneState(payload.data)),
           completed: Boolean((payload.data as any).completed_at),
           deletedInSource: isDelete,
           sourceUpdatedAt: (payload.data as any).updated_at ?? null,

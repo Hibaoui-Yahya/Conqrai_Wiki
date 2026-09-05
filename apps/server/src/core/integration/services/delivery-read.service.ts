@@ -213,8 +213,12 @@ export class DeliveryReadService {
           workspaceId,
           workItemUrn: model.urn,
           title: model.title ?? null,
-          state: (model.fields?.state as string) ?? null,
-          stateGroup: (model.fields?.stateGroup as string) ?? null,
+          // `undefined`, not `null`: a live answer that could not name the
+          // state says nothing about it, so the stored name is kept rather
+          // than wiped. Only a delivery that carries an unreadable state
+          // clears it.
+          state: (model.fields?.state as string) ?? undefined,
+          stateGroup: (model.fields?.stateGroup as string) ?? undefined,
           completed: Boolean(model.fields?.completed),
           sourceUpdatedAt: model.sourceVersion ?? null,
         });
