@@ -29,6 +29,14 @@ export interface DeliveryStatusUpdate {
   workItemUrn: string;
   planeProjectId?: string | null;
   title?: string | null;
+  /**
+   * `undefined` leaves the stored value alone; `null` clears it.
+   *
+   * The two are not the same and conflating them loses information in both
+   * directions. A partial update that says nothing about state must not erase
+   * a good value, and a delivery that carries a state we cannot render must
+   * not leave the previous name standing as though it were current.
+   */
   state?: string | null;
   stateGroup?: string | null;
   completed?: boolean;
@@ -99,8 +107,11 @@ export class DeliveryProjectionService {
       workItemUrn: update.workItemUrn,
       planeProjectId: update.planeProjectId ?? existing?.planeProjectId ?? null,
       title: update.title ?? existing?.title ?? null,
-      state: update.state ?? existing?.state ?? null,
-      stateGroup: update.stateGroup ?? existing?.stateGroup ?? null,
+      state: update.state === undefined ? (existing?.state ?? null) : update.state,
+      stateGroup:
+        update.stateGroup === undefined
+          ? (existing?.stateGroup ?? null)
+          : update.stateGroup,
       completed: update.completed ?? existing?.completed ?? false,
       deletedInSource: update.deletedInSource ?? existing?.deletedInSource ?? false,
       sourceUpdatedAt: incoming ?? (existing?.sourceUpdatedAt as any) ?? null,
