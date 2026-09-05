@@ -60,7 +60,7 @@ ConqrHub call site that does not delegate breaks the moment the key is
 rotated. Before switching, confirm none are left:
 
 ```bash
-grep -rn "this\.plane\.\|this\.planeClient\." apps/server/src --include=*.ts   | grep -v spec | grep -v "isEnabled"
+grep -rn "this\.plane\.\|this\.planeClient\." apps/server/src --include=*.ts \n  | grep -v spec | grep -v isEnabled
 ```
 
 Every hit must pass a call context. The check matters twice over: a call site
