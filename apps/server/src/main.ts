@@ -12,6 +12,7 @@ import fastifyMultipart from '@fastify/multipart';
 import fastifyCookie from '@fastify/cookie';
 import fastifyIp from 'fastify-ip';
 import { InternalLogFilter } from './common/logger/internal-log-filter';
+import { NO_WORKSPACE_REQUIRED_URL_PREFIXES } from './common/middlewares/domain-exempt-routes';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -81,17 +82,10 @@ async function bootstrap() {
       this.send('');
     })
     .addHook('preHandler', function (req, reply, done) {
-      // don't require workspaceId for the following paths
-      const excludedPaths = [
-        '/api/auth/setup',
-        '/api/health',
-        '/api/billing/stripe/webhook',
-        '/api/workspace/check-hostname',
-        '/api/sso/google',
-        '/api/workspace/create',
-        '/api/workspace/joined',
-        '/api/workspace/find-by-email',
-      ];
+      // Don't require a resolved workspaceId for these. Derived, not
+      // hand-maintained: a route excluded from DomainMiddleware can never
+      // acquire a workspaceId, so omitting it here makes it unreachable.
+      const excludedPaths = NO_WORKSPACE_REQUIRED_URL_PREFIXES;
 
       if (
         req.originalUrl.startsWith('/api') &&
