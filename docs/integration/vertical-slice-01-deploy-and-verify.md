@@ -54,6 +54,20 @@ Steps 3 and 6 are the two that bite.
 `person_uid` or `org_uid` is refused, not guessed. Deploy without provisioning
 and every cross-product call stops — safely, but completely.
 
+**Step 6 has a prerequisite that is easy to miss.** A bot token is refused on
+every delegated endpoint unless the request carries a delegation, so *any*
+ConqrHub call site that does not delegate breaks the moment the key is
+rotated. Before switching, confirm none are left:
+
+```bash
+grep -rn "this\.plane\.\|this\.planeClient\." apps/server/src --include=*.ts   | grep -v spec | grep -v "isEnabled"
+```
+
+Every hit must pass a call context. The check matters twice over: a call site
+with no delegation that happens to hit a *non*-delegated endpoint does not
+fail - it answers as the API key's owner, which is the escalation this release
+exists to close.
+
 **Why step 6 is last.** A *bot* token (`user_type` 1) authenticates no human on
 its own and is refused without a valid delegation. A *human* token keeps
 working undelegated, which is exactly the privilege escalation this release
@@ -248,9 +262,52 @@ that reads them.
 
 ---
 
+## 7b. What production actually runs (2026-09-05)
+
+The cutover is done. Recorded here so the next operator does not have to
+re-derive it.
+
+| | |
+|---|---|
+| Bridge credential | `api_tokens.label = 'conqrhub-bridge'`, `user_type` 1 (Bot), `is_service` true |
+| Owner | user `ConqrHub Bridge`, `is_bot` true, unusable password, **0 workspace memberships, 0 project memberships** |
+| Revoke | `UPDATE api_tokens SET is_active = false WHERE label = 'conqrhub-bridge';` |
+
+The bot deliberately has no membership anywhere. It needs none: a delegated
+request authorises the *mapped human*, and `assert_workspace_membership`
+checks that human, not the token owner. An undelegated bot request is refused
+outright. So there is no configuration in which the bot's own access matters -
+which is the point, and is what makes "least privilege" here mean *zero*
+privilege rather than a smaller role.
+
+Verified against production after the switch:
+
+| Request | Result |
+|---|---|
+| bot alone, no delegation | 403 |
+| bot + delegation, caller is a project member | 200 |
+| bot + delegation, caller is a workspace member but **not** in the project | 403 |
+| bot + delegation for an unmapped person | 403 `identity_unmapped` |
+| wrong scope / wrong audience / expired / tampered signature | 403, each with its own classification |
+| a personal token, undelegated | 200 - Plane's public API is unchanged |
+
+Audit rows name both halves: `calling_service = 'conqrhub-bridge'` and the
+resolved human. The previous credential appears in older rows as
+`conqrservice-integration`; it is a personal token and is no longer used by
+the integration.
+
+One thing to expect when reading the audit table: only endpoints that require
+a delegation write rows. `GET /projects/` does not, so a project listing
+carries a delegation but leaves no audit row. Absence of a row is not absence
+of a delegation.
+
 ## 8. Known limits
 
-- The webhook leg is unproven (§5).
+- The webhook leg is unproven (§5). Production has recorded **zero** webhook
+  deliveries to date, so this is untested rather than merely unobserved.
+- Background indexing runs as the person who created the project→space
+  mapping. A mapping with no recorded creator is skipped, so its work items
+  are never indexed and never appear in semantic search.
 - Symmetric signing — both products hold the same key. ConqrPlan could mint a
   delegation for ConqrPlan; it cannot mint anything for ConqrHub.
 - No `jti` replay cache — a captured token is replayable within its 5-minute
