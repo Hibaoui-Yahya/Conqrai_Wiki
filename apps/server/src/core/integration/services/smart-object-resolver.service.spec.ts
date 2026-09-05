@@ -22,6 +22,19 @@ function makeResolver(overrides: {
     pageRepo as any,
     planeClient as any,
     environment as any,
+    // Work items are resolved as the *viewer*, so the resolver mints a
+    // read-only delegation per call. Asserting it is passed is the point of
+    // the permission-leak tests below.
+    {
+      mintForPlane: jest.fn().mockReturnValue({
+        token: 'viewer-obo-token',
+        jti: 'viewer-corr',
+        personUid: 'conqr:person:viewer',
+        orgUid: 'conqr:org:ws',
+        scope: ['work-item:read'],
+        expiresAt: 9_999_999,
+      }),
+    } as any,
   );
 }
 

@@ -6,6 +6,15 @@ import {
 } from '../../../../core/integration/services/plane-client.service';
 import { ChatTool, ChatToolContext } from './chat-tool.types';
 import { ChatToolRegistry } from './chat-tool.registry';
+import {
+  WorkItemFieldArgs,
+  normalizeWorkItem,
+  workItemWritableFields,
+  writeWorkItem,
+} from './work-item-fields';
+import { DELEGATED_SCOPES } from '../../../../core/integration/domain/delegated-token.util';
+import { DelegatedTokenService } from '../../../../core/integration/services/delegated-token.service';
+import { delegateForPlane } from './plane-delegation.helper';
 
 /**
  * Cross-product tools: let the suite assistant (chat + MCP) read and create
@@ -40,13 +49,17 @@ export class ListConqrPlanProjectsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(_args: unknown, _ctx: ChatToolContext) {
+  async execute(_args: unknown, ctx: ChatToolContext) {
+    // Delegated like every other read: the caller sees the projects they are a
+    // member of, not the projects the bridge credential can reach.
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      return await this.plane.listProjects();
+      return await this.plane.listProjects(call);
     } catch (err) {
       return toolError(err);
     }
@@ -66,16 +79,19 @@ export class SearchWorkItemsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string; query?: string; limit?: number }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string; query?: string; limit?: number }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const { results } = await this.plane.listWorkItems(args.projectId, {
-        search: args.query,
-        perPage: args.limit ?? 20,
-      });
+      const { results } = await this.plane.listWorkItems(
+        args.projectId,
+        { search: args.query, perPage: args.limit ?? 20 },
+        call,
+      );
       return results.map(workItemSummary);
     } catch (err) {
       return toolError(err);
@@ -94,14 +110,19 @@ export class GetWorkItemTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string; workItemId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string; workItemId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const w = await this.plane.getWorkItem(args.projectId, args.workItemId);
-      return { ...workItemSummary(w), description: w.description_stripped ?? null };
+      const w = await this.plane.getWorkItem(args.projectId, args.workItemId, call);
+      // Full normalised representation: the previous shape dropped assignees
+      // and labels even though the payload carried them, so a caller could not
+      // confirm what a write had actually stored.
+      return normalizeWorkItem(w, args.projectId);
     } catch (err) {
       return toolError(err);
     }
@@ -112,43 +133,33 @@ export class GetWorkItemTool implements ChatTool, OnModuleInit {
 export class CreateWorkItemTool implements ChatTool, OnModuleInit {
   readonly name = 'create_work_item';
   readonly description =
-    'Create a work item in a ConqrPlan project. Use only when the user explicitly asks to create work. Returns the created item.';
+    'Create a work item in a ConqrPlan project with its full field set: state, assignees, labels, dates, parent, type, estimate, cycle and modules. Use only when the user explicitly asks to create work. Returns the complete stored item. Ids that would be silently dropped are rejected instead.';
   readonly parameters = z.object({
     projectId: z.string(),
     name: z.string().min(1).max(255),
-    description: z.string().optional().describe('Plain-text or HTML description'),
-    priority: z.enum(['urgent', 'high', 'medium', 'low', 'none']).optional(),
+    ...workItemWritableFields,
   });
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
   async execute(
-    args: { projectId: string; name: string; description?: string; priority?: string },
+    args: { projectId: string; name: string } & WorkItemFieldArgs,
     ctx: ChatToolContext,
   ) {
-    try {
-      const html = args.description?.trim().startsWith('<')
-        ? args.description
-        : args.description
-          ? `<p>${args.description}</p>`
-          : undefined;
-      const w = await this.plane.createWorkItem(
-        args.projectId,
-        {
-          name: args.name,
-          description_html: html,
-          priority: args.priority,
-        },
-        { onBehalfOf: ctx.user.id },
-      );
-      return workItemSummary(w);
-    } catch (err) {
-      return toolError(err);
-    }
+    const { projectId, name, ...fields } = args;
+    // Creating an item may also place it in a cycle or modules, so the
+    // delegation carries those scopes too - and nothing else.
+    const call = delegateForPlane(this.delegation, ctx, [
+      DELEGATED_SCOPES.workItemCreate,
+      DELEGATED_SCOPES.cycleAssign,
+      DELEGATED_SCOPES.moduleAssign,
+    ]);
+    return writeWorkItem(this.plane, projectId, { kind: 'create', name }, fields, call);
   }
 }
 
@@ -161,13 +172,15 @@ export class GetProjectCyclesTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      return await this.plane.listCycles(args.projectId);
+      return await this.plane.listCycles(args.projectId, call);
     } catch (err) {
       return toolError(err);
     }

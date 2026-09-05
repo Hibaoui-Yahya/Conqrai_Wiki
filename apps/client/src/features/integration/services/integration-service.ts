@@ -2,6 +2,9 @@ import api from "@/lib/api-client";
 import {
   CreateRelationshipRequest,
   IntegrationRelationship,
+  LinkedWorkPreview,
+  LinkedWorkReceipt,
+  PageRequirementsResponse,
   PresentationModel,
   ProjectSpaceMapping,
   ResolveRequest,
@@ -209,4 +212,73 @@ export async function federatedSearch(
     { query },
   );
   return res.data.items;
+}
+
+// ---------------------------------------------------------------------------
+// Vertical Slice 01 — requirement to linked execution
+// ---------------------------------------------------------------------------
+
+export async function getPageRequirements(
+  pageId: string,
+  planeProjectId?: string,
+): Promise<PageRequirementsResponse> {
+  const res = await api.post<PageRequirementsResponse>(
+    "/integrations/requirements/page",
+    { pageId, planeProjectId },
+  );
+  return res.data;
+}
+
+export interface LinkedWorkInput {
+  requirementId: string;
+  planeProjectId?: string;
+  title?: string;
+  descriptionHtml?: string;
+  priority?: string;
+}
+
+/** Describes the mutation without performing it. */
+export async function previewLinkedWork(
+  req: LinkedWorkInput,
+): Promise<LinkedWorkPreview> {
+  const res = await api.post<LinkedWorkPreview>(
+    "/integrations/requirements/preview-linked-work",
+    req,
+  );
+  return res.data;
+}
+
+/**
+ * Create the work item and record the canonical relationship, under the
+ * caller's own delegated identity. Safe to repeat: the backend derives an
+ * idempotency key from the requirement and project.
+ */
+export async function createLinkedWork(
+  req: LinkedWorkInput,
+): Promise<LinkedWorkReceipt> {
+  const res = await api.post<LinkedWorkReceipt>(
+    "/integrations/requirements/create-linked-work",
+    req,
+  );
+  return res.data;
+}
+
+export interface RegisteredRequirement {
+  id: string;
+  pageId: string;
+  blockId: string;
+  title: string | null;
+  state: string;
+}
+
+export async function registerRequirement(req: {
+  pageId: string;
+  blockId: string;
+  title?: string;
+}): Promise<RegisteredRequirement> {
+  const res = await api.post<RegisteredRequirement>(
+    "/integrations/requirements/register",
+    req,
+  );
+  return res.data;
 }

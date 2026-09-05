@@ -7,7 +7,9 @@
     "build": "tsc && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "format": "prettier --write \"src/**/*.tsx\" \"src/**/*.ts\""
+    "format": "prettier --write \"src/**/*.tsx\" \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@casl/react": "^5.0.1",
@@ -67,6 +69,9 @@
   "devDependencies": {
     "@eslint/js": "^9.28.0",
     "@tanstack/eslint-plugin-query": "^5.94.5",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/blueimp-load-image": "^5.16.6",
     "@types/chroma-js": "^3.1.2",
     "@types/file-saver": "^2.0.7",
@@ -81,6 +86,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^15.13.0",
+    "jsdom": "^30.0.1",
     "optics-ts": "^2.4.1",
     "postcss": "^8.5.12",
     "postcss-preset-mantine": "^1.18.0",
@@ -88,6 +94,7 @@
     "prettier": "^3.8.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.1",
-    "vite": "8.0.5"
+    "vite": "8.0.5",
+    "vitest": "^5.0.0"
   }
 }

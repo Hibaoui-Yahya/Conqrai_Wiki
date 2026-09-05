@@ -1,4 +1,4 @@
-import { Box, ScrollArea, Text } from "@mantine/core";
+import { Box, Divider, ScrollArea, Text } from "@mantine/core";
 import CommentListWithTabs from "@/features/comment/components/comment-list-with-tabs.tsx";
 import { useAtom } from "jotai";
 import { asideStateAtom } from "@/components/layouts/global/hooks/atoms/sidebar-atom.ts";
@@ -12,6 +12,7 @@ import { useParams } from "react-router-dom";
 import { extractPageSlugId } from "@/lib";
 import { usePageQuery } from "@/features/page/queries/page-query.ts";
 import { useSpaceMappings } from "@/features/integration/queries/integration-query.ts";
+import { RequirementDeliveryPanel } from "@/features/integration/components/requirement-delivery-panel";
 import { KnowledgePanel } from "@/features/integration/components/knowledge-panel.tsx";
 import PageAttachmentsPanel from "@/features/attachments/components/page-attachments-panel.tsx";
 
@@ -54,11 +55,22 @@ export default function Aside() {
       title = "Attachments";
       break;
     case "links":
+      // Requirements first: they are the unit delivery is tracked against, and
+      // the general link graph below is context for them rather than a peer.
+      // Both live in the same tab so there is one place to look for "what is
+      // connected to this page".
       component = currentPage?.id ? (
-        <KnowledgePanel
-          urn={`conqr://hub/page/${currentPage.id}`}
-          planeProjectId={mappedProjectId}
-        />
+        <>
+          <RequirementDeliveryPanel
+            pageId={currentPage.id}
+            planeProjectId={mappedProjectId}
+          />
+          <Divider my="md" color="var(--border-subtle)" />
+          <KnowledgePanel
+            urn={`conqr://hub/page/${currentPage.id}`}
+            planeProjectId={mappedProjectId}
+          />
+        </>
       ) : null;
       title = "Related work & knowledge";
       break;

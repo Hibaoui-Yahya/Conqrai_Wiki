@@ -12,13 +12,21 @@ function make(findResult: any[] = []) {
       .mockResolvedValue({ suggestionsEmitted: 1 }),
   };
   const aiQueue = { add: jest.fn().mockResolvedValue({}) };
+  // The delivery-status projection. Recorded per call so ordering and
+  // idempotency can be asserted without a database here; the real ordering
+  // rule is proven against Postgres in delivery-projection.service.spec.ts.
+  const projection = {
+    apply: jest.fn().mockResolvedValue({ applied: true, reason: 'created' }),
+  };
   return {
     service: new PlaneWebhookProcessorService(
       relationships as any,
       events as any,
       lifecycle as any,
+      projection as any,
       aiQueue as any,
     ),
+    projection,
     events,
     relationships,
     lifecycle,

@@ -44,6 +44,7 @@ import CommentDialog from "@/features/comment/components/comment-dialog";
 import { EditorBubbleMenu } from "@/features/editor/components/bubble-menu/bubble-menu";
 import { ReadonlyBubbleMenu } from "@/features/editor/components/bubble-menu/readonly-bubble-menu";
 import { CreateWorkItemFromSelection } from "@/features/integration/components/create-work-item-from-selection";
+import { MarkRequirementFromSelection } from "@/features/integration/components/mark-requirement-from-selection";
 import TableCellMenu from "@/features/editor/components/table/table-cell-menu.tsx";
 import TableMenu from "@/features/editor/components/table/table-menu.tsx";
 import ImageMenu from "@/features/editor/components/image/image-menu.tsx";
@@ -421,6 +422,7 @@ export default function PageEditor({
         )}
 
         {editor && editorIsEditable && <CreateWorkItemFromSelection />}
+        {editor && editorIsEditable && <MarkRequirementFromSelection />}
         {editor && editorIsEditable && (
           <div>
             <EditorAiMenu editor={editor} />

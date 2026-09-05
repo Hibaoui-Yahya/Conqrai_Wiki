@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { SearchService } from '../../search/search.service';
 import { ProjectSpaceMappingRepo } from '@docmost/db/repos/integration/project-space-mapping.repo';
 import { PlaneClientService } from './plane-client.service';
+import { DelegatedTokenService } from './delegated-token.service';
+import { DELEGATED_SCOPES } from '../domain/delegated-token.util';
 import { buildUrn } from '../domain/urn.util';
 import { EnvironmentService } from '../../../integrations/environment/environment.service';
 
@@ -41,6 +43,7 @@ export class FederatedSearchService {
     private readonly mappings: ProjectSpaceMappingRepo,
     private readonly plane: PlaneClientService,
     private readonly environment: EnvironmentService,
+    private readonly delegation: DelegatedTokenService,
   ) {}
 
   async search(
@@ -88,7 +91,7 @@ export class FederatedSearchService {
 
   private async searchPlane(
     query: string,
-    opts: { workspaceId: string; planeProjectId?: string },
+    opts: { workspaceId: string; userId: string; planeProjectId?: string },
   ): Promise<FederatedResult[]> {
     if (!this.plane.isEnabled()) return [];
 
@@ -107,10 +110,16 @@ export class FederatedSearchService {
     const perProject = await Promise.all(
       projectIds.map(async (pid) => {
         try {
-          const { results } = await this.plane.listWorkItems(pid, {
-            search: query,
-            perPage: PLANE_PER_PROJECT,
-          });
+          // The Hub half of this search is already filtered to what the
+          // searcher may read; the ConqrPlan half has to be too, or federated
+          // search becomes a way to read titles from projects you are not in.
+          const { results } = await this.plane.listWorkItems(
+            pid,
+            { search: query, perPage: PLANE_PER_PROJECT },
+            this.delegation.mintCallContext(opts.userId, opts.workspaceId, [
+              DELEGATED_SCOPES.workItemRead,
+            ]),
+          );
           const appUrl = this.environment.getPlaneAppUrl();
           const slug = this.environment.getPlaneWorkspaceSlug();
           return results.map((wi) => ({

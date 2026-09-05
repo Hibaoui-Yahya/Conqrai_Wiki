@@ -419,9 +419,46 @@ export class EnvironmentService {
     return this.configService.get<string>('PLANE_API_KEY', '');
   }
 
-  /** Plane workspace slug the API calls are scoped to. */
+  /**
+   * Default Plane workspace slug.
+   *
+   * Delegated (on-behalf-of) calls must not depend on this: the tenant comes
+   * from the delegated token and ConqrPlan validates it against the acting
+   * user's membership. It remains a default for non-delegated read paths and
+   * for local development.
+   */
   getPlaneWorkspaceSlug(): string {
     return this.configService.get<string>('PLANE_WORKSPACE_SLUG', '');
+  }
+
+  /**
+   * Signing key for cross-product on-behalf-of tokens.
+   *
+   * Deliberately NOT the app secret. ConqrPlan must hold this key to verify
+   * delegations, and the app secret also signs ConqrHub sessions and share
+   * links - handing that to another product would let ConqrPlan mint ConqrHub
+   * sessions. This key only mints and verifies OBO tokens for the ConqrPlan
+   * audience, so compromising ConqrPlan cannot escalate into ConqrHub.
+   *
+   * Falls back to the app secret when unset so existing deployments keep
+   * working; isDelegationKeyDedicated() reports the fallback so it can be
+   * surfaced rather than silently accepted.
+   */
+  getDelegationSigningKey(): string {
+    return (
+      this.configService.get<string>('CONQR_OBO_SIGNING_KEY', '') ||
+      this.getAppSecret()
+    );
+  }
+
+  /** False when the OBO key has fallen back to the shared app secret. */
+  isDelegationKeyDedicated(): boolean {
+    return Boolean(this.configService.get<string>('CONQR_OBO_SIGNING_KEY', ''));
+  }
+
+  /** Issuer stamped into delegated tokens (`iss`) and required by ConqrPlan. */
+  getDelegationIssuer(): string {
+    return this.configService.get<string>('CONQR_OBO_ISSUER', 'conqrhub');
   }
 
   /**

@@ -15,7 +15,18 @@ function make(overrides: {
   const relationships = {
     create: overrides.createRel ?? jest.fn().mockResolvedValue({ id: 'rel1' }),
   };
-  const delegatedTokens = { mint: jest.fn().mockReturnValue('obo.token.sig') };
+  // Delegation is minted per call; the jti doubles as the correlation id, so
+  // the service must use it rather than generating its own.
+  const delegatedTokens = {
+    mintForPlane: jest.fn().mockReturnValue({
+      token: 'obo.token.sig',
+      jti: 'corr-from-token',
+      personUid: 'conqr:person:user-1',
+      orgUid: 'conqr:org:ws-1',
+      scope: ['work-item:create'],
+      expiresAt: 9_999_999,
+    }),
+  };
   return {
     service: new WorkItemCreationService(
       plane as any,

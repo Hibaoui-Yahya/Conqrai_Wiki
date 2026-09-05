@@ -69,6 +69,7 @@ import { GetGuideTool } from './tools/get-guide.tool';
 // Cross-product ConqrPlan tools
 import { PLANE_WORK_ITEM_TOOLS } from './tools/plane-work-items.tools';
 import { PLANE_WORK_MANAGEMENT_TOOLS } from './tools/plane-work-management.tools';
+import { PLANE_CONTROL_TOOLS } from './tools/plane-control.tools';
 // Suite integration tools (federated search, links, create-and-link, coverage)
 import { SUITE_INTEGRATION_TOOLS } from './tools/suite-integration.tools';
 
@@ -145,6 +146,7 @@ import { SUITE_INTEGRATION_TOOLS } from './tools/suite-integration.tools';
     // Cross-product ConqrPlan tools
     ...PLANE_WORK_ITEM_TOOLS,
     ...PLANE_WORK_MANAGEMENT_TOOLS,
+    ...PLANE_CONTROL_TOOLS,
     // Suite integration tools (federated search, links, create-and-link, coverage)
     ...SUITE_INTEGRATION_TOOLS,
   ],

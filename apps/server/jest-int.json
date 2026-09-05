@@ -1,0 +1,19 @@
+{
+  "//": "Database-backed integration tests, separate from the unit suite so `pnpm test` still passes on a machine with nothing running. These skip themselves when no database is reachable.",
+  "moduleFileExtensions": [
+    "js",
+    "json",
+    "ts"
+  ],
+  "rootDir": "src",
+  "testEnvironment": "node",
+  "testRegex": ".int-spec.ts$",
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "moduleNameMapper": {
+    "^@docmost/db/(.*)$": "<rootDir>/database/$1",
+    "^@docmost/transactional/(.*)$": "<rootDir>/integrations/transactional/$1",
+    "^@docmost/ee/(.*)$": "<rootDir>/ee/$1"
+  }
+}

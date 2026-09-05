@@ -4,6 +4,14 @@ import { PlaneClientService } from '../../../../core/integration/services/plane-
 import { ChatTool, ChatToolContext } from './chat-tool.types';
 import { ChatToolRegistry } from './chat-tool.registry';
 import { toolError, workItemSummary } from './plane-work-items.tools';
+import {
+  WorkItemFieldArgs,
+  workItemWritableFields,
+  writeWorkItem,
+} from './work-item-fields';
+import { DELEGATED_SCOPES } from '../../../../core/integration/domain/delegated-token.util';
+import { DelegatedTokenService } from '../../../../core/integration/services/delegated-token.service';
+import { delegateForPlane } from './plane-delegation.helper';
 
 /**
  * Deeper ConqrPlan work-management coverage for the suite assistant
@@ -24,70 +32,32 @@ const toHtml = (text?: string): string | undefined =>
 export class UpdateWorkItemTool implements ChatTool, OnModuleInit {
   readonly name = 'update_work_item';
   readonly description =
-    'Update a ConqrPlan work item: rename it, edit its description, change priority, move it to another state (stateId from list_work_item_states), or set its estimate (estimatePointId from list_estimate_points). Only send the fields you want to change. Use only when the user explicitly asks.';
+    'Update a ConqrPlan work item. Covers the same fields as create_work_item: name, description, priority, state, assignees, labels, start and target dates, parent, type, estimate, cycle and modules. Send only the fields you want to change; pass null to clear a field. Returns the complete stored item. Use only when the user explicitly asks.';
   readonly parameters = z.object({
     projectId: z.string(),
     workItemId: z.string(),
     name: z.string().min(1).max(255).optional(),
-    description: z.string().optional().describe('Plain-text or HTML description'),
-    priority: z.enum(['urgent', 'high', 'medium', 'low', 'none']).optional(),
-    stateId: z
-      .string()
-      .optional()
-      .describe('Target state ID (from list_work_item_states)'),
-    estimatePointId: z
-      .string()
-      .nullable()
-      .optional()
-      .describe('Estimate point ID (from list_estimate_points); null clears the estimate'),
+    ...workItemWritableFields,
   });
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
   async execute(
-    args: {
-      projectId: string;
-      workItemId: string;
-      name?: string;
-      description?: string;
-      priority?: string;
-      stateId?: string;
-      estimatePointId?: string | null;
-    },
+    args: { projectId: string; workItemId: string; name?: string } & WorkItemFieldArgs,
     ctx: ChatToolContext,
   ) {
-    if (
-      args.name === undefined &&
-      args.description === undefined &&
-      args.priority === undefined &&
-      args.stateId === undefined &&
-      args.estimatePointId === undefined
-    ) {
-      return { error: 'Nothing to update — pass at least one of name, description, priority, stateId, estimatePointId.' };
-    }
-    try {
-      const w = await this.plane.updateWorkItem(
-        args.projectId,
-        args.workItemId,
-        {
-          name: args.name,
-          description_html: toHtml(args.description),
-          priority: args.priority,
-          state: args.stateId,
-          ...(args.estimatePointId !== undefined
-            ? { estimate_point: args.estimatePointId }
-            : {}),
-        },
-        { onBehalfOf: ctx.user.id },
-      );
-      return workItemSummary(w);
-    } catch (err) {
-      return toolError(err);
-    }
+    const { projectId, workItemId, ...fields } = args;
+    const call = delegateForPlane(this.delegation, ctx, [
+      DELEGATED_SCOPES.workItemUpdate,
+      DELEGATED_SCOPES.cycleAssign,
+      DELEGATED_SCOPES.moduleAssign,
+    ]);
+    return writeWorkItem(this.plane, projectId, { kind: 'update', workItemId }, fields, call);
   }
 }
 
@@ -100,13 +70,15 @@ export class ListWorkItemStatesTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const states = await this.plane.listStates(args.projectId);
+      const states = await this.plane.listStates(args.projectId, call);
       return states.map((s) => ({
         id: s.id,
         name: s.name,
@@ -132,18 +104,21 @@ export class GetWorkItemCommentsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
   async execute(
     args: { projectId: string; workItemId: string; limit?: number },
-    _ctx: ChatToolContext,
+    ctx: ChatToolContext,
   ) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
       const comments = await this.plane.listWorkItemComments(
         args.projectId,
         args.workItemId,
+        call,
       );
       return comments.slice(0, args.limit ?? 20).map((c) => ({
         id: c.id,
@@ -170,6 +145,7 @@ export class AddWorkItemCommentTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
@@ -183,7 +159,7 @@ export class AddWorkItemCommentTool implements ChatTool, OnModuleInit {
         args.projectId,
         args.workItemId,
         toHtml(args.text)!,
-        { onBehalfOf: ctx.user.id },
+        delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemUpdate]),
       );
       return { id: c.id, createdAt: c.created_at ?? null, success: true };
     } catch (err) {
@@ -205,18 +181,21 @@ export class ListCycleWorkItemsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
   async execute(
     args: { projectId: string; cycleId: string; limit?: number },
-    _ctx: ChatToolContext,
+    ctx: ChatToolContext,
   ) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
       const items = await this.plane.listCycleWorkItems(
         args.projectId,
         args.cycleId,
+        call,
       );
       return items.slice(0, args.limit ?? 50).map(workItemSummary);
     } catch (err) {
@@ -234,13 +213,15 @@ export class ListEstimatePointsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.estimateRead]);
     try {
-      const estimates = await this.plane.listEstimates(args.projectId);
+      const estimates = await this.plane.listEstimates(args.projectId, call);
       return estimates.map((e) => ({
         id: e.id,
         name: e.name,
@@ -265,13 +246,15 @@ export class ListWorkItemLabelsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const labels = await this.plane.listLabels(args.projectId);
+      const labels = await this.plane.listLabels(args.projectId, call);
       return labels.map((l) => ({ id: l.id, name: l.name, color: l.color ?? null }));
     } catch (err) {
       return toolError(err);
@@ -288,13 +271,15 @@ export class ListConqrPlanMembersTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(_args: unknown, _ctx: ChatToolContext) {
+  async execute(_args: unknown, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const members = await this.plane.listWorkspaceMembers();
+      const members = await this.plane.listWorkspaceMembers(call);
       return members.map((m) => ({
         id: m.id,
         displayName:

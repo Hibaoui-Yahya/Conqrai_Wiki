@@ -11,6 +11,7 @@ import {
   IconMessage,
   IconSparkles,
   IconSquarePlus,
+  IconTargetArrow,
 } from "@tabler/icons-react";
 import clsx from "clsx";
 import classes from "./bubble-menu.module.css";
@@ -30,6 +31,7 @@ import { useTranslation } from "react-i18next";
 import { showAiMenuAtom, showLinkMenuAtom } from "@/features/editor/atoms/editor-atoms";
 import { workspaceAtom } from "@/features/user/atoms/current-user-atom";
 import { createWorkItemDraftAtom } from "@/features/integration/atoms/create-work-item-atom";
+import { markRequirementDraftAtom } from "@/features/integration/atoms/mark-requirement-atom";
 
 export interface BubbleMenuItem {
   name: string;
@@ -50,6 +52,7 @@ export const EditorBubbleMenu: FC<EditorBubbleMenuProps> = (props) => {
   const isGenerativeAiEnabled = workspace?.settings?.ai?.generative !== false;
   const [, setDraftCommentId] = useAtom(draftCommentIdAtom);
   const [, setCreateWorkItemDraft] = useAtom(createWorkItemDraftAtom);
+  const [, setMarkRequirementDraft] = useAtom(markRequirementDraftAtom);
   const showCommentPopupRef = useRef(showCommentPopup);
   const showAiMenuRef = useRef(showAiMenu);
   const [showLinkMenu] = useAtom(showLinkMenuAtom);
@@ -139,6 +142,18 @@ export const EditorBubbleMenu: FC<EditorBubbleMenuProps> = (props) => {
       .trim()
       .slice(0, 200);
     setCreateWorkItemDraft({ open: true, title: text });
+  };
+
+  // Track the selection as a requirement (Vertical Slice 01). Selection only:
+  // the page and the API call belong to the page-scoped host, so the editor
+  // stays unaware of the integration.
+  const markRequirement = () => {
+    const { from, to } = props.editor.state.selection;
+    const text = props.editor.state.doc
+      .textBetween(from, to, " ")
+      .trim()
+      .slice(0, 200);
+    setMarkRequirementDraft({ open: true, title: text });
   };
 
   const bubbleMenuProps: EditorBubbleMenuProps = {
@@ -262,6 +277,19 @@ export const EditorBubbleMenu: FC<EditorBubbleMenuProps> = (props) => {
             onClick={commentItem.command}
           >
             <IconMessage size={16} stroke={2} />
+          </ActionIcon>
+        </Tooltip>
+
+        <Tooltip label={t("Mark as requirement")} withArrow withinPortal={false}>
+          <ActionIcon
+            variant="default"
+            size="lg"
+            radius="6px"
+            aria-label={t("Mark as requirement")}
+            style={{ border: "none" }}
+            onClick={markRequirement}
+          >
+            <IconTargetArrow size={16} stroke={2} />
           </ActionIcon>
         </Tooltip>
 

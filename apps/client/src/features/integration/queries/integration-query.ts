@@ -8,6 +8,10 @@ import {
   removeRelationship,
   resolveSmartObjects,
   searchWorkItems,
+  createLinkedWork,
+  getPageRequirements,
+  previewLinkedWork,
+  registerRequirement,
 } from "@/features/integration/services/integration-service";
 import {
   CreateRelationshipRequest,
@@ -99,6 +103,62 @@ export function useRemoveRelationshipMutation(affectedUrns: string[] = []) {
       affectedUrns.forEach((urn) =>
         queryClient.invalidateQueries({ queryKey: ["relationships", urn] }),
       );
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Vertical Slice 01 — requirement to linked execution
+// ---------------------------------------------------------------------------
+
+export const PAGE_REQUIREMENTS_KEY = "page-requirements";
+
+/**
+ * Requirements on a page with coverage and permission-shaped related work.
+ *
+ * Keyed on the page so an SSE work-item change can invalidate exactly this,
+ * and no polling is needed: live updates arrive through useIntegrationEvents.
+ */
+export function usePageRequirements(
+  pageId: string | undefined,
+  planeProjectId?: string,
+) {
+  return useQuery({
+    queryKey: [PAGE_REQUIREMENTS_KEY, pageId, planeProjectId],
+    queryFn: () => getPageRequirements(pageId!, planeProjectId),
+    enabled: !!pageId,
+  });
+}
+
+/**
+ * Fetch the preview for a requirement.
+ *
+ * A mutation rather than a query even though it reads: it is triggered by the
+ * user opening the dialog, not by rendering, and firing it on render would
+ * make an unbounded number of cross-product calls as a page scrolls.
+ */
+export function usePreviewLinkedWorkMutation() {
+  return useMutation({ mutationFn: previewLinkedWork });
+}
+
+export function useCreateLinkedWorkMutation(pageId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createLinkedWork,
+    onSuccess: () => {
+      // Coverage and the related-work cards both change.
+      queryClient.invalidateQueries({ queryKey: [PAGE_REQUIREMENTS_KEY, pageId] });
+      queryClient.invalidateQueries({ queryKey: ["smart-objects"] });
+    },
+  });
+}
+
+export function useRegisterRequirementMutation(pageId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: registerRequirement,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [PAGE_REQUIREMENTS_KEY, pageId] });
     },
   });
 }

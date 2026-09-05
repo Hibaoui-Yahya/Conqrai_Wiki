@@ -21,6 +21,7 @@ import { HealthAlertsService } from '../../../core/doc-health/services/alerts.se
 import { BrokenLinksService } from '../../../core/doc-health/services/broken-links.service';
 import { DuplicatesService } from '../../../core/doc-health/services/duplicates.service';
 import { SearchAnalyticsService } from '../../../core/search/search-analytics.service';
+import { DeliveryReconciliationService } from '../../../core/integration/services/delivery-reconciliation.service';
 
 @Processor(QueueName.GENERAL_QUEUE)
 export class GeneralQueueProcessor
@@ -62,6 +63,38 @@ export class GeneralQueueProcessor
             job.data as IPageBacklinkJob,
           );
           break;
+        }
+
+        case QueueJob.DELIVERY_PROJECTION_RECONCILE: {
+          // Repairs delivery projections that events did not keep current: a
+          // webhook that never fired, a consumer down past the sender's retry
+          // budget, a dead-lettered delivery nobody replayed. Resolved through
+          // the same permission-shaped read path as a page view, with no
+          // elevated access.
+          const reconciliation = this.moduleRef.get(
+            DeliveryReconciliationService,
+            { strict: false },
+          );
+          if (!reconciliation) {
+            this.logger.warn(
+              'DELIVERY_PROJECTION_RECONCILE fired but service not resolvable',
+            );
+            return;
+          }
+          const data = (job.data ?? {}) as { workspaceId?: string };
+          const metrics = await reconciliation.reconcile({
+            workspaceId: data.workspaceId,
+          });
+          this.logger.log(
+            `Delivery reconciliation [${metrics.runId}]: scanned ${metrics.scanned}, ` +
+              `repaired ${metrics.repaired}, skipped ${metrics.skipped}, ` +
+              `restricted ${metrics.restricted}, failed ${metrics.failed} ` +
+              `across ${metrics.workspaces} workspace(s) in ${metrics.durationMs}ms`,
+          );
+          // Surfaced on the job so an operator can read the outcome from the
+          // queue rather than grepping logs.
+          await job.updateData({ ...(job.data ?? {}), metrics });
+          return;
         }
 
         case QueueJob.DOC_HEALTH_SNAPSHOT: {

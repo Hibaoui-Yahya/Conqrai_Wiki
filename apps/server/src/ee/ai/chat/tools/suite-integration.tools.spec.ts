@@ -42,13 +42,32 @@ function makeMocks(planeEnabled = true) {
   };
 }
 
+
+/** Delegation stub: reads must carry a signed on-behalf-of token. */
+function makeDelegation() {
+  return {
+    mintForPlane: jest.fn().mockImplementation(({ scope }: { scope: string[] }) => ({
+      token: 'obo-token',
+      jti: 'corr-1',
+      personUid: 'conqr:person:user-1',
+      orgUid: 'conqr:org:ws-1',
+      scope,
+      expiresAt: 9_999_999,
+    })),
+    mintCallContext: jest.fn().mockReturnValue({
+      delegation: 'obo-token',
+      correlationId: 'corr-1',
+    }),
+  } as any;
+}
+
 describe('Suite integration tools', () => {
   it('registers no tool when the Plane integration is disabled', () => {
     const m = makeMocks(false);
     const registry = new ChatToolRegistry();
     [
       new SearchSuiteTool(m.plane, m.federatedSearch, registry),
-      new LinkPageToWorkItemTool(m.plane, m.relationships, m.pageService, m.spaceAbility, registry),
+      new LinkPageToWorkItemTool(m.plane, m.relationships, m.pageService, m.spaceAbility, registry, makeDelegation()),
       new GetPageLinksTool(m.plane, m.relationships, m.pageService, m.spaceAbility, registry),
       new CreateWorkItemFromPageTool(m.plane, m.workItemCreation, m.pageService, m.spaceAbility, registry),
       new GetPageWorkCoverageTool(m.plane, m.traceability, m.pageService, m.spaceAbility, registry),
@@ -128,6 +147,7 @@ describe('Suite integration tools', () => {
       m.pageService,
       m.spaceAbility,
       new ChatToolRegistry(),
+      makeDelegation(),
     );
 
     const result: any = await tool.execute(

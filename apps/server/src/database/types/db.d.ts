@@ -399,6 +399,24 @@ export interface IntegrationRequirements {
   workspaceId: string;
 }
 
+export interface IntegrationWorkItemStatus {
+  completed: Generated<boolean>;
+  createdAt: Generated<Timestamp>;
+  deletedInSource: Generated<boolean>;
+  id: Generated<string>;
+  lastDeliveryId: string | null;
+  lastEventAt: Timestamp | null;
+  planeProjectId: string | null;
+  reconciledAt: Timestamp | null;
+  sourceUpdatedAt: Timestamp | null;
+  state: string | null;
+  stateGroup: string | null;
+  title: string | null;
+  updatedAt: Generated<Timestamp>;
+  workItemUrn: string;
+  workspaceId: string;
+}
+
 export interface IntegrationWebhookDeliveries {
   action: string | null;
   attempts: Generated<number>;
@@ -924,6 +942,7 @@ export interface DB {
   integrationRelationships: IntegrationRelationships;
   integrationRequirements: IntegrationRequirements;
   integrationWebhookDeliveries: IntegrationWebhookDeliveries;
+  integrationWorkItemStatus: IntegrationWorkItemStatus;
   mcpOauthClients: McpOauthClients;
   mcpOauthRefreshTokens: McpOauthRefreshTokens;
   meetingActionProposals: MeetingActionProposals;

@@ -92,6 +92,7 @@ export enum QueueJob {
   PDF_EXPORT_CLEANUP = 'pdf-export-cleanup',
 
   DOC_HEALTH_SNAPSHOT = 'doc-health-snapshot',
+  DELIVERY_PROJECTION_RECONCILE = 'delivery-projection-reconcile',
   DOC_HEALTH_PRUNE = 'doc-health-prune',
 
   BROKEN_LINKS_SCAN_ALL = 'broken-links-scan-all',

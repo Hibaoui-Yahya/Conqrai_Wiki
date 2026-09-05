@@ -1,8 +1,9 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { PlaneClientService } from './plane-client.service';
+import { PlaneApiError, PlaneClientService } from './plane-client.service';
 import { RelationshipService } from './relationship.service';
 import { DelegatedTokenService } from './delegated-token.service';
+import { DELEGATED_SCOPES } from '../domain/delegated-token.util';
 import { parseUrn, buildUrn } from '../domain/urn.util';
 import { RelationType } from '../domain/relationship-types';
 import { IntegrationRelationship } from '@docmost/db/types/entity.types';
@@ -19,15 +20,35 @@ export interface CreateFromHubInput {
   priority?: string;
   /** Relation stated from the Hub side; defaults to specified_by. */
   relationType?: RelationType;
+  /**
+   * Idempotency key for the ConqrPlan write.
+   *
+   * ConqrPlan enforces uniqueness on (external_id, external_source) per
+   * project and answers a repeat with 409 plus the id of the item that already
+   * exists. Supplying a key that is derived from the intent - "work for this
+   * requirement in this project" - is what makes a retry converge instead of
+   * creating a second work item. Omit it for genuinely ad-hoc creation, where
+   * two items for one source may be exactly what the user wants.
+   */
+  idempotencyKey?: string;
 }
 
 export interface CreateFromHubResult {
-  status: 'created' | 'created_link_failed';
+  /**
+   * `created`      the item is new and linked
+   * `already_exists` the idempotency key matched an existing item; the link was
+   *                  ensured, so a retry converges rather than duplicating
+   * `created_link_failed` the item exists in ConqrPlan but the Hub link did
+   *                  not land; recoverable by retrying with the same key
+   */
+  status: 'created' | 'already_exists' | 'created_link_failed';
   workItem: PlaneWorkItem;
   workItemUrn: string;
   relationship?: IntegrationRelationship;
   correlationId: string;
   warning?: string;
+  /** The key the write was made under, echoed so a retry can reuse it. */
+  idempotencyKey?: string;
 }
 
 /**
@@ -42,7 +63,15 @@ export interface CreateFromHubResult {
 export class WorkItemCreationService {
   private readonly logger = new Logger(WorkItemCreationService.name);
 
-  private static readonly MAX_BATCH = 100;
+  /**
+   * Batch ceiling for work-item creation. Exported so the MCP bulk tool
+   * enforces the same limit before making any call, rather than restating a
+   * number that could drift from the server's.
+   */
+  static readonly MAX_BATCH = 100;
+
+  /** Namespace for ConqrHub-issued idempotency keys in ConqrPlan. */
+  private static readonly EXTERNAL_SOURCE = 'conqrhub';
 
   constructor(
     private readonly plane: PlaneClientService,
@@ -73,27 +102,61 @@ export class WorkItemCreationService {
       throw new BadRequestException('planeProjectId is required');
     }
 
-    const correlationId = randomUUID();
-
-    // Mint a short-lived, least-privilege on-behalf-of token so the write
-    // carries the acting user's identity, not an anonymous bot (§9.1).
-    const oboToken = this.delegatedTokens.mint({
-      actorId: input.actorId,
-      workspaceId: input.workspaceId,
-      audience: 'plane-adapter',
-      scope: ['work-item:create'],
+    // Mint a short-lived, least-privilege on-behalf-of token so the write is
+    // authorised as the acting human, not as the API key's owner (§9.1). The
+    // token's jti is the correlation id for the whole exchange, so ConqrHub's
+    // audit row, ConqrPlan's audit row and the resulting event all agree.
+    const delegation = this.delegatedTokens.mintForPlane({
+      hubUserId: input.actorId,
+      hubWorkspaceId: input.workspaceId,
+      scope: [DELEGATED_SCOPES.workItemCreate],
     });
+    const correlationId = delegation.jti;
 
     // 1) Create the work item in Plane (owner of work).
-    const workItem = await this.plane.createWorkItem(
-      input.planeProjectId,
-      {
-        name: input.title,
-        description_html: input.descriptionHtml,
-        priority: input.priority,
-      },
-      { onBehalfOf: oboToken },
-    );
+    //
+    // There is no distributed transaction here and there cannot be: ConqrPlan
+    // owns the work item, ConqrHub owns the relationship, and neither can roll
+    // the other back. Convergence is what replaces it - the same idempotency
+    // key always names the same work item, so a retry after any failure below
+    // re-finds that item instead of creating a second one.
+    let workItem: PlaneWorkItem;
+    let alreadyExisted = false;
+    try {
+      workItem = await this.plane.createWorkItem(
+        input.planeProjectId,
+        {
+          name: input.title,
+          description_html: input.descriptionHtml,
+          priority: input.priority,
+          ...(input.idempotencyKey
+            ? {
+                external_id: input.idempotencyKey,
+                external_source: WorkItemCreationService.EXTERNAL_SOURCE,
+              }
+            : {}),
+        },
+        { delegation: delegation.token, correlationId },
+      );
+    } catch (err) {
+      const existingId =
+        err instanceof PlaneApiError && err.status === 409
+          ? (err.details as any)?.id
+          : undefined;
+      if (!existingId) throw err;
+
+      // The work already exists under this key. This is the retry path, and
+      // also the repair path for a previous created_link_failed: fetch the
+      // item and fall through so the relationship is ensured.
+      this.logger.log(
+        `Idempotency key '${input.idempotencyKey}' already resolved to work item ${existingId}; ensuring the link`,
+      );
+      workItem = await this.plane.getWorkItem(input.planeProjectId, existingId, {
+        delegation: delegation.token,
+        correlationId,
+      });
+      alreadyExisted = true;
+    }
 
     const workItemUrn = buildUrn('plane', 'work-item', workItem.id);
     const relationType = input.relationType ?? RelationType.SpecifiedBy;
@@ -114,11 +177,14 @@ export class WorkItemCreationService {
         correlationId,
       });
       return {
-        status: 'created',
+        // insertIfAbsent means re-linking an existing edge returns that edge
+        // rather than a duplicate, so this path is safe to repeat.
+        status: alreadyExisted ? 'already_exists' : 'created',
         workItem,
         workItemUrn,
         relationship,
         correlationId,
+        idempotencyKey: input.idempotencyKey,
       };
     } catch (err) {
       // The item exists in Plane; be honest that only the link failed.
@@ -131,8 +197,10 @@ export class WorkItemCreationService {
         workItem,
         workItemUrn,
         correlationId,
-        warning:
-          'Work item was created in Plane but could not be linked. Retry the link.',
+        idempotencyKey: input.idempotencyKey,
+        warning: input.idempotencyKey
+          ? 'The work item exists in ConqrPlan but could not be linked. Retry with the same idempotency key: it will re-find the item and only create the link.'
+          : 'Work item was created in Plane but could not be linked. Retry the link.',
       };
     }
   }
@@ -160,7 +228,7 @@ export class WorkItemCreationService {
     failed: number;
     results: Array<{
       index: number;
-      status: 'created' | 'created_link_failed' | 'failed';
+      status: 'created' | 'already_exists' | 'created_link_failed' | 'failed';
       workItemUrn?: string;
       error?: string;
     }>;
@@ -179,7 +247,7 @@ export class WorkItemCreationService {
 
     const results: Array<{
       index: number;
-      status: 'created' | 'created_link_failed' | 'failed';
+      status: 'created' | 'already_exists' | 'created_link_failed' | 'failed';
       workItemUrn?: string;
       error?: string;
     }> = [];

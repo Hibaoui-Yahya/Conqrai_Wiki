@@ -12,9 +12,15 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
 }
 
 function mockFetchOnce(status: number, body: unknown) {
+  // Mirrors a real Response: the client reads the body as text so that empty
+  // 204s (membership removal) do not blow up on JSON.parse. Keeping `json`
+  // here as well means a mock that only implements one of the two cannot
+  // quietly pass.
+  const text = body === undefined ? '' : JSON.stringify(body);
   (global.fetch as jest.Mock).mockResolvedValueOnce({
     ok: status >= 200 && status < 300,
     status,
+    text: async () => text,
     json: async () => body,
   });
 }

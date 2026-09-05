@@ -19,6 +19,15 @@ import { NotificationDedupService } from './services/notification-dedup.service'
 import { FederatedSearchService } from './services/federated-search.service';
 import { LifecycleAutomationService } from './services/lifecycle-automation.service';
 import { RequirementService } from './services/requirement.service';
+import {
+  PAGE_LOCATOR,
+  RequirementDeliveryService,
+} from './services/requirement-delivery.service';
+import { DeliveryProjectionService } from './services/delivery-projection.service';
+import { DeliveryReadService } from './services/delivery-read.service';
+import { DeliveryReconciliationService } from './services/delivery-reconciliation.service';
+import { DeliveryReconciliationCronService } from './services/delivery-reconciliation-cron.service';
+import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { IntegrationEventBus } from './services/integration-event-bus';
 import { CrossProductInsightService } from './services/cross-product-insight.service';
 import { DelegatedTokenService } from './services/delegated-token.service';
@@ -52,6 +61,15 @@ import { PagePromotionService } from './services/page-promotion.service';
     FederatedSearchService,
     LifecycleAutomationService,
     RequirementService,
+    RequirementDeliveryService,
+    DeliveryProjectionService,
+    DeliveryReadService,
+    DeliveryReconciliationService,
+    DeliveryReconciliationCronService,
+    // PageRepo satisfies PageLocator; injected by token so the slice service
+    // does not import its module graph, which pulls an ESM editor dependency
+    // into every consumer and breaks unit tests.
+    { provide: PAGE_LOCATOR, useExisting: PageRepo },
     IntegrationEventBus,
     CrossProductInsightService,
     DelegatedTokenService,
@@ -67,6 +85,9 @@ import { PagePromotionService } from './services/page-promotion.service';
     NotificationDedupService,
     FederatedSearchService,
     RequirementService,
+    RequirementDeliveryService,
+    DeliveryProjectionService,
+    DeliveryReadService,
     CrossProductInsightService,
     DelegatedTokenService,
   ],

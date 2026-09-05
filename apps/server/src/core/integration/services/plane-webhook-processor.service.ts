@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { RelationshipRepo } from '@docmost/db/repos/integration/relationship.repo';
 import { IntegrationEventService } from './integration-event.service';
+import { DeliveryProjectionService } from './delivery-projection.service';
 import { LifecycleAutomationService } from './lifecycle-automation.service';
 import { buildUrn } from '../domain/urn.util';
 import { EventType } from '../domain/event-envelope';
@@ -33,6 +34,7 @@ export class PlaneWebhookProcessorService {
     private readonly relationships: RelationshipRepo,
     private readonly events: IntegrationEventService,
     private readonly lifecycle: LifecycleAutomationService,
+    private readonly projection: DeliveryProjectionService,
     @InjectQueue(QueueName.AI_QUEUE) private readonly aiQueue: Queue,
   ) {}
 
@@ -102,6 +104,38 @@ export class PlaneWebhookProcessorService {
     );
 
     for (const workspaceId of workspaces) {
+      // Project the delivery status the Hub experience renders.
+      //
+      // Ordered by ConqrPlan's own updated_at, not by arrival: this stream is
+      // at-least-once and unordered, so a retried delivery from ten minutes
+      // ago would otherwise roll a work item's status backwards and the page
+      // would show something that is no longer true. `apply` discards anything
+      // older than what it already holds.
+      try {
+        await this.projection.apply({
+          workspaceId,
+          workItemUrn: subject,
+          planeProjectId: payload.data.project ? String(payload.data.project) : null,
+          title: (payload.data as any).name ?? null,
+          state:
+            (payload.data as any).state_detail?.name ??
+            (typeof (payload.data as any).state === 'string'
+              ? (payload.data as any).state
+              : null),
+          stateGroup: (payload.data as any).state_detail?.group ?? null,
+          completed: Boolean((payload.data as any).completed_at),
+          deletedInSource: isDelete,
+          sourceUpdatedAt: (payload.data as any).updated_at ?? null,
+          deliveryId,
+        });
+      } catch (err) {
+        // A projection failure must not stop the fan-out below; the row is
+        // repaired by reconciliation.
+        this.logger.warn(
+          `Failed to project status for ${subject} in ${workspaceId}: ${(err as Error).message}`,
+        );
+      }
+
       await this.events.record({
         workspaceId,
         type: isDelete
