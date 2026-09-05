@@ -26,6 +26,7 @@ import { DocHealthModule } from './doc-health/doc-health.module';
 import { ExpertInsightsModule } from './expert-insights/expert-insights.module';
 import { IntegrationModule } from './integration/integration.module';
 import { ClsMiddleware } from 'nestjs-cls';
+import { DOMAIN_EXEMPT_ROUTES } from '../common/middlewares/domain-exempt-routes';
 
 @Module({
   imports: [
@@ -52,14 +53,7 @@ import { ClsMiddleware } from 'nestjs-cls';
 })
 export class CoreModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    const excludedRoutes = [
-      { path: 'auth/setup', method: RequestMethod.POST },
-      { path: 'health', method: RequestMethod.GET },
-      { path: 'health/live', method: RequestMethod.GET },
-      { path: 'billing/stripe/webhook', method: RequestMethod.POST },
-      // Plane webhook has no workspace/session context — skip domain & audit.
-      { path: 'integrations/plane/webhook', method: RequestMethod.POST },
-    ];
+    const excludedRoutes = [...DOMAIN_EXEMPT_ROUTES];
 
     consumer
       .apply(DomainMiddleware)
