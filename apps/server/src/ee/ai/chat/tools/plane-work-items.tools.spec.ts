@@ -47,11 +47,11 @@ function makePlaneMock(enabled: boolean) {
 
 function constructAll(plane: any, registry: ChatToolRegistry) {
   return [
-    new ListConqrPlanProjectsTool(plane, registry),
-    new SearchWorkItemsTool(plane, registry),
-    new GetWorkItemTool(plane, registry),
+    new ListConqrPlanProjectsTool(plane, registry, makeDelegation()),
+    new SearchWorkItemsTool(plane, registry, makeDelegation()),
+    new GetWorkItemTool(plane, registry, makeDelegation()),
     new CreateWorkItemTool(plane, registry, makeDelegation()),
-    new GetProjectCyclesTool(plane, registry),
+    new GetProjectCyclesTool(plane, registry, makeDelegation()),
   ];
 }
 
@@ -95,14 +95,15 @@ describe('Plane work-item tools', () => {
       ],
     });
     const registry = new ChatToolRegistry();
-    const tool = new SearchWorkItemsTool(plane as any, registry);
+    const tool = new SearchWorkItemsTool(plane as any, registry, makeDelegation());
 
     const result = await tool.execute({ projectId: 'proj-1', query: 'login' }, ctx);
 
-    expect(plane.listWorkItems).toHaveBeenCalledWith('proj-1', {
-      search: 'login',
-      perPage: 20,
-    });
+    expect(plane.listWorkItems).toHaveBeenCalledWith(
+      'proj-1',
+      { search: 'login', perPage: 20 },
+      { delegation: 'obo-token', correlationId: 'corr-1' },
+    );
     expect(result).toEqual([
       {
         id: 'wi-1',
@@ -181,7 +182,7 @@ describe('Plane work-item tools', () => {
       new PlaneApiError('Plane API 503 for /issues/', 503, false),
     );
     const registry = new ChatToolRegistry();
-    const tool = new SearchWorkItemsTool(plane as any, registry);
+    const tool = new SearchWorkItemsTool(plane as any, registry, makeDelegation());
 
     const result = await tool.execute({ projectId: 'proj-1' }, ctx);
 

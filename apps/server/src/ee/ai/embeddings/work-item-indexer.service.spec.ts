@@ -1,3 +1,22 @@
+
+/** Delegation stub: reads must carry a signed on-behalf-of token. */
+function makeDelegation() {
+  return {
+    mintForPlane: jest.fn().mockImplementation(({ scope }: { scope: string[] }) => ({
+      token: 'obo-token',
+      jti: 'corr-1',
+      personUid: 'conqr:person:user-1',
+      orgUid: 'conqr:org:ws-1',
+      scope,
+      expiresAt: 9_999_999,
+    })),
+    mintCallContext: jest.fn().mockReturnValue({
+      delegation: 'obo-token',
+      correlationId: 'corr-1',
+    }),
+  } as any;
+}
+
 import { WorkItemIndexerService } from './work-item-indexer.service';
 import { PlaneApiError } from '../../../core/integration/services/plane-client.service';
 
@@ -26,6 +45,7 @@ function makeDeps(overrides: Partial<Record<string, any>> = {}) {
       spaceId: 'sp-1',
       planeProjectId: 'proj-1',
       mappingKind: 'primary',
+      createdBy: 'user-1',
     }),
     ...overrides.mappings,
   };
@@ -57,6 +77,7 @@ function makeDeps(overrides: Partial<Record<string, any>> = {}) {
     deleteBySource: jest.fn().mockResolvedValue(undefined),
     ...overrides.repo,
   };
+  const delegation = makeDelegation();
   const svc = new WorkItemIndexerService(
     plane as any,
     mappings as any,
@@ -64,8 +85,9 @@ function makeDeps(overrides: Partial<Record<string, any>> = {}) {
     env as any,
     chunking as any,
     repo as any,
+    delegation,
   );
-  return { svc, plane, mappings, aiProvider, env, chunking, repo };
+  return { svc, plane, mappings, aiProvider, env, chunking, repo, delegation };
 }
 
 describe('WorkItemIndexerService', () => {
@@ -106,6 +128,41 @@ describe('WorkItemIndexerService', () => {
     });
     const res = await svc.indexWorkItem('wi-1', 'proj-1');
     expect(res.status).toBe('unmapped');
+    expect(repo.upsertChunks).not.toHaveBeenCalled();
+  });
+
+  it('reads ConqrPlan as the person who created the mapping', async () => {
+    const { svc, plane, delegation } = makeDeps();
+
+    await svc.indexWorkItem('wi-1', 'proj-1');
+
+    expect(delegation.mintCallContext).toHaveBeenCalledWith('user-1', 'ws-1', [
+      'work-item:read',
+    ]);
+    expect(plane.getWorkItem).toHaveBeenCalledWith('proj-1', 'wi-1', {
+      delegation: 'obo-token',
+      correlationId: 'corr-1',
+    });
+  });
+
+  it('skips a mapping with no recorded creator rather than reading as the bridge credential', async () => {
+    const { svc, plane, repo } = makeDeps({
+      mappings: {
+        findPrimaryForProjectAnyWorkspace: jest.fn().mockResolvedValue({
+          id: 'm1',
+          workspaceId: 'ws-1',
+          spaceId: 'sp-1',
+          planeProjectId: 'proj-1',
+          mappingKind: 'primary',
+          createdBy: null,
+        }),
+      },
+    });
+
+    const res = await svc.indexWorkItem('wi-1', 'proj-1');
+
+    expect(res.status).toBe('no_actor');
+    expect(plane.getWorkItem).not.toHaveBeenCalled();
     expect(repo.upsertChunks).not.toHaveBeenCalled();
   });
 

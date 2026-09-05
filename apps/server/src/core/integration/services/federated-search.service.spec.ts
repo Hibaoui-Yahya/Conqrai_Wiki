@@ -1,3 +1,22 @@
+
+/** Delegation stub: reads must carry a signed on-behalf-of token. */
+function makeDelegation() {
+  return {
+    mintForPlane: jest.fn().mockImplementation(({ scope }: { scope: string[] }) => ({
+      token: 'obo-token',
+      jti: 'corr-1',
+      personUid: 'conqr:person:user-1',
+      orgUid: 'conqr:org:ws-1',
+      scope,
+      expiresAt: 9_999_999,
+    })),
+    mintCallContext: jest.fn().mockReturnValue({
+      delegation: 'obo-token',
+      correlationId: 'corr-1',
+    }),
+  } as any;
+}
+
 import { FederatedSearchService } from './federated-search.service';
 
 function make(opts: {
@@ -29,6 +48,7 @@ function make(opts: {
       mappings as any,
       plane as any,
       environment as any,
+      makeDelegation(),
     ),
     hubSearch,
     plane,

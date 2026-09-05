@@ -54,13 +54,13 @@ function makePlaneMock(enabled: boolean) {
 function constructAll(plane: any, registry: ChatToolRegistry) {
   return [
     new UpdateWorkItemTool(plane, registry, makeDelegation()),
-    new ListWorkItemStatesTool(plane, registry),
-    new GetWorkItemCommentsTool(plane, registry),
+    new ListWorkItemStatesTool(plane, registry, makeDelegation()),
+    new GetWorkItemCommentsTool(plane, registry, makeDelegation()),
     new AddWorkItemCommentTool(plane, registry, makeDelegation()),
-    new ListCycleWorkItemsTool(plane, registry),
-    new ListEstimatePointsTool(plane, registry),
-    new ListWorkItemLabelsTool(plane, registry),
-    new ListConqrPlanMembersTool(plane, registry),
+    new ListCycleWorkItemsTool(plane, registry, makeDelegation()),
+    new ListEstimatePointsTool(plane, registry, makeDelegation()),
+    new ListWorkItemLabelsTool(plane, registry, makeDelegation()),
+    new ListConqrPlanMembersTool(plane, registry, makeDelegation()),
   ];
 }
 
@@ -102,7 +102,7 @@ describe('Plane work-management tools', () => {
         ],
       },
     ]);
-    const tool = new ListEstimatePointsTool(plane as any, new ChatToolRegistry());
+    const tool = new ListEstimatePointsTool(plane as any, new ChatToolRegistry(), makeDelegation());
 
     const result = await tool.execute({ projectId: 'proj-1' }, ctx);
 
@@ -195,7 +195,7 @@ describe('Plane work-management tools', () => {
         created_at: '2026-08-30T00:00:00Z',
       },
     ]);
-    const tool = new GetWorkItemCommentsTool(plane as any, new ChatToolRegistry());
+    const tool = new GetWorkItemCommentsTool(plane as any, new ChatToolRegistry(), makeDelegation());
 
     const result = await tool.execute({ projectId: 'p', workItemId: 'w' }, ctx);
 
@@ -240,11 +240,11 @@ describe('Plane work-management tools', () => {
         updated_at: '2026-08-20T00:00:00Z',
       },
     ]);
-    const tool = new ListCycleWorkItemsTool(plane as any, new ChatToolRegistry());
+    const tool = new ListCycleWorkItemsTool(plane as any, new ChatToolRegistry(), makeDelegation());
 
     const result = await tool.execute({ projectId: 'p', cycleId: 'cy-1' }, ctx);
 
-    expect(plane.listCycleWorkItems).toHaveBeenCalledWith('p', 'cy-1');
+    expect(plane.listCycleWorkItems).toHaveBeenCalledWith('p', 'cy-1', { delegation: 'obo-token', correlationId: 'corr-1' });
     expect(result).toEqual([
       {
         id: 'wi-9',
@@ -264,7 +264,7 @@ describe('Plane work-management tools', () => {
       { id: 's-1', name: 'Backlog', group: 'backlog', default: true },
       { id: 's-2', name: 'Done', group: 'completed' },
     ]);
-    const tool = new ListWorkItemStatesTool(plane as any, new ChatToolRegistry());
+    const tool = new ListWorkItemStatesTool(plane as any, new ChatToolRegistry(), makeDelegation());
 
     const result = await tool.execute({ projectId: 'p' }, ctx);
 
@@ -280,7 +280,7 @@ describe('Plane work-management tools', () => {
       { id: 'm-1', display_name: 'Yahya', email: 'y@x.com' },
       { id: 'm-2', first_name: 'Ada', last_name: 'Lovelace' },
     ]);
-    const tool = new ListConqrPlanMembersTool(plane as any, new ChatToolRegistry());
+    const tool = new ListConqrPlanMembersTool(plane as any, new ChatToolRegistry(), makeDelegation());
 
     const result = await tool.execute({}, ctx);
 
@@ -293,7 +293,7 @@ describe('Plane work-management tools', () => {
   it('tools surface PlaneApiError as a structured error object', async () => {
     const plane = makePlaneMock(true);
     plane.listStates.mockRejectedValue(new PlaneApiError('Plane API 503', 503, true));
-    const tool = new ListWorkItemStatesTool(plane as any, new ChatToolRegistry());
+    const tool = new ListWorkItemStatesTool(plane as any, new ChatToolRegistry(), makeDelegation());
 
     const result = await tool.execute({ projectId: 'p' }, ctx);
 

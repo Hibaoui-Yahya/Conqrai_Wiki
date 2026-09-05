@@ -24,6 +24,8 @@ import { ProjectSpaceMappingService } from './services/project-space-mapping.ser
 import { SmartObjectResolverService } from './services/smart-object-resolver.service';
 import { WorkItemCreationService } from './services/work-item-creation.service';
 import { PlaneClientService } from './services/plane-client.service';
+import { DelegatedTokenService } from './services/delegated-token.service';
+import { DELEGATED_SCOPES } from './domain/delegated-token.util';
 import { PlaneWebhookService } from './services/plane-webhook.service';
 import { TraceabilityService } from './services/traceability.service';
 import { NotificationDedupService } from './services/notification-dedup.service';
@@ -74,6 +76,7 @@ export class IntegrationController {
     private readonly insights: CrossProductInsightService,
     private readonly pagePromotion: PagePromotionService,
     private readonly workspaceAbility: WorkspaceAbilityFactory,
+    private readonly delegation: DelegatedTokenService,
   ) {}
 
   /** Live stream of integration refresh events for the current workspace (§8.4). */
@@ -341,25 +344,41 @@ export class IntegrationController {
    */
   @HttpCode(HttpStatus.OK)
   @Post('plane/projects')
-  async listPlaneProjects() {
+  async listPlaneProjects(
+    @AuthUser() user: User,
+    @AuthWorkspace() workspace: Workspace,
+  ) {
     if (!this.plane.isEnabled()) {
       return { items: [], integrationEnabled: false };
     }
-    const items = await this.plane.listProjects();
+    // The picker lists the projects this admin can see in ConqrPlan, not the
+    // ones the bridge credential can reach.
+    const items = await this.plane.listProjects(
+      this.delegation.mintCallContext(user.id, workspace.id, [
+        DELEGATED_SCOPES.workItemRead,
+      ]),
+    );
     return { items, integrationEnabled: true };
   }
 
   /** Search existing Plane work items to embed/link in a Hub page (§5.1C). */
   @HttpCode(HttpStatus.OK)
   @Post('work-items/search')
-  async searchWorkItems(@Body() dto: SearchWorkItemsDto) {
+  async searchWorkItems(
+    @Body() dto: SearchWorkItemsDto,
+    @AuthUser() user: User,
+    @AuthWorkspace() workspace: Workspace,
+  ) {
     if (!this.plane.isEnabled()) {
       return { items: [], integrationEnabled: false };
     }
-    const { results } = await this.plane.listWorkItems(dto.planeProjectId, {
-      search: dto.search,
-      perPage: 25,
-    });
+    const { results } = await this.plane.listWorkItems(
+      dto.planeProjectId,
+      { search: dto.search, perPage: 25 },
+      this.delegation.mintCallContext(user.id, workspace.id, [
+        DELEGATED_SCOPES.workItemRead,
+      ]),
+    );
     const items = results.map((wi) => ({
       urn: `conqr://plane/work-item/${wi.id}`,
       id: wi.id,

@@ -70,13 +70,15 @@ export class ListWorkItemStatesTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const states = await this.plane.listStates(args.projectId);
+      const states = await this.plane.listStates(args.projectId, call);
       return states.map((s) => ({
         id: s.id,
         name: s.name,
@@ -102,18 +104,21 @@ export class GetWorkItemCommentsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
   async execute(
     args: { projectId: string; workItemId: string; limit?: number },
-    _ctx: ChatToolContext,
+    ctx: ChatToolContext,
   ) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
       const comments = await this.plane.listWorkItemComments(
         args.projectId,
         args.workItemId,
+        call,
       );
       return comments.slice(0, args.limit ?? 20).map((c) => ({
         id: c.id,
@@ -176,18 +181,21 @@ export class ListCycleWorkItemsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
   async execute(
     args: { projectId: string; cycleId: string; limit?: number },
-    _ctx: ChatToolContext,
+    ctx: ChatToolContext,
   ) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
       const items = await this.plane.listCycleWorkItems(
         args.projectId,
         args.cycleId,
+        call,
       );
       return items.slice(0, args.limit ?? 50).map(workItemSummary);
     } catch (err) {
@@ -205,13 +213,15 @@ export class ListEstimatePointsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.estimateRead]);
     try {
-      const estimates = await this.plane.listEstimates(args.projectId);
+      const estimates = await this.plane.listEstimates(args.projectId, call);
       return estimates.map((e) => ({
         id: e.id,
         name: e.name,
@@ -236,13 +246,15 @@ export class ListWorkItemLabelsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const labels = await this.plane.listLabels(args.projectId);
+      const labels = await this.plane.listLabels(args.projectId, call);
       return labels.map((l) => ({ id: l.id, name: l.name, color: l.color ?? null }));
     } catch (err) {
       return toolError(err);
@@ -259,13 +271,15 @@ export class ListConqrPlanMembersTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(_args: unknown, _ctx: ChatToolContext) {
+  async execute(_args: unknown, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const members = await this.plane.listWorkspaceMembers();
+      const members = await this.plane.listWorkspaceMembers(call);
       return members.map((m) => ({
         id: m.id,
         displayName:

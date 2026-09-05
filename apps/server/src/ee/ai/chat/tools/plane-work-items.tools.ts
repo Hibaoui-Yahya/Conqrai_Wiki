@@ -49,13 +49,17 @@ export class ListConqrPlanProjectsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(_args: unknown, _ctx: ChatToolContext) {
+  async execute(_args: unknown, ctx: ChatToolContext) {
+    // Delegated like every other read: the caller sees the projects they are a
+    // member of, not the projects the bridge credential can reach.
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      return await this.plane.listProjects();
+      return await this.plane.listProjects(call);
     } catch (err) {
       return toolError(err);
     }
@@ -75,16 +79,19 @@ export class SearchWorkItemsTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string; query?: string; limit?: number }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string; query?: string; limit?: number }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const { results } = await this.plane.listWorkItems(args.projectId, {
-        search: args.query,
-        perPage: args.limit ?? 20,
-      });
+      const { results } = await this.plane.listWorkItems(
+        args.projectId,
+        { search: args.query, perPage: args.limit ?? 20 },
+        call,
+      );
       return results.map(workItemSummary);
     } catch (err) {
       return toolError(err);
@@ -103,13 +110,15 @@ export class GetWorkItemTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string; workItemId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string; workItemId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      const w = await this.plane.getWorkItem(args.projectId, args.workItemId);
+      const w = await this.plane.getWorkItem(args.projectId, args.workItemId, call);
       // Full normalised representation: the previous shape dropped assignees
       // and labels even though the payload carried them, so a caller could not
       // confirm what a write had actually stored.
@@ -163,13 +172,15 @@ export class GetProjectCyclesTool implements ChatTool, OnModuleInit {
   constructor(
     private readonly plane: PlaneClientService,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
   }
-  async execute(args: { projectId: string }, _ctx: ChatToolContext) {
+  async execute(args: { projectId: string }, ctx: ChatToolContext) {
+    const call = delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]);
     try {
-      return await this.plane.listCycles(args.projectId);
+      return await this.plane.listCycles(args.projectId, call);
     } catch (err) {
       return toolError(err);
     }

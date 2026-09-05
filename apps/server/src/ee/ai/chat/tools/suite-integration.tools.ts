@@ -21,6 +21,9 @@ import { labelOf, RelationType } from '../../../../core/integration/domain/relat
 import { ChatTool, ChatToolContext } from './chat-tool.types';
 import { ChatToolRegistry } from './chat-tool.registry';
 import { toolError, workItemSummary } from './plane-work-items.tools';
+import { DELEGATED_SCOPES } from '../../../../core/integration/domain/delegated-token.util';
+import { DelegatedTokenService } from '../../../../core/integration/services/delegated-token.service';
+import { delegateForPlane } from './plane-delegation.helper';
 
 /**
  * Suite integration tools: one-call cross-product workflows between ConqrHub
@@ -137,6 +140,7 @@ export class LinkPageToWorkItemTool implements ChatTool, OnModuleInit {
     private readonly pageService: PageService,
     private readonly spaceAbility: SpaceAbilityFactory,
     private readonly registry: ChatToolRegistry,
+    private readonly delegation: DelegatedTokenService,
   ) {}
   onModuleInit(): void {
     if (this.plane.isEnabled()) this.registry.register(this);
@@ -159,9 +163,13 @@ export class LinkPageToWorkItemTool implements ChatTool, OnModuleInit {
     );
     try {
       // Verify the work item actually exists before recording an edge to it.
+      // Existence is checked as the linking human. A work item they cannot
+      // see must not become linkable just because the bridge credential can
+      // see it - that would leak the target's existence through the edge.
       const workItem = await this.plane.getWorkItem(
         args.projectId,
         args.workItemId,
+        delegateForPlane(this.delegation, ctx, [DELEGATED_SCOPES.workItemRead]),
       );
       const relationType = args.relationType ?? RelationType.SpecifiedBy;
       const rel = await this.relationships.create({

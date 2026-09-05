@@ -108,6 +108,24 @@ export class DelegatedTokenService {
   }
 
   /**
+   * Mint a delegation already shaped as a ConqrPlan call context.
+   *
+   * Services and controllers hold a user id and a workspace id rather than a
+   * `ChatToolContext`, so they cannot use `delegateForPlane`. Without this they
+   * were calling ConqrPlan with no delegation at all, which meant the reply
+   * described what the *bridge credential* could see - not what the viewer
+   * could. Every read path now names a human.
+   */
+  mintCallContext(
+    hubUserId: string,
+    hubWorkspaceId: string,
+    scope: DelegatedScope[],
+  ): { delegation: string; correlationId: string } {
+    const minted = this.mintForPlane({ hubUserId, hubWorkspaceId, scope });
+    return { delegation: minted.token, correlationId: minted.jti };
+  }
+
+  /**
    * Verify a delegation. Used by ConqrHub's own inbound delegated endpoints;
    * ConqrPlan verifies independently with the same contract.
    */
