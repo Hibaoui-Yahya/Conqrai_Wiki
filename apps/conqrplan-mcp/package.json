@@ -1,0 +1,21 @@
+{
+  "name": "@conqr/conqrplan-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "dev": "ts-node src/main.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@conqr/conqrplan-core": "workspace:*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/node": "^22.5.0"
+  }
+}

@@ -390,7 +390,13 @@ export class McpService {
     }
 
     try {
-      const result = await tool.execute(args, toolCtx as any);
+      // Same routing decision as the chat surface: one place decides which
+      // implementation answers, so the two cannot disagree.
+      const result = await this.toolRegistry.executeTool(
+        tool,
+        args,
+        toolCtx as any,
+      );
 
       // A tool may return rich MCP content (e.g. an image the model can view,
       // a document's extracted text) via `{ __mcpContent: [...] }`. Forward

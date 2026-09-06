@@ -123,7 +123,8 @@
     "undici": "7.24.0",
     "ws": "^8.20.0",
     "yauzl": "^3.2.1",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@conqr/conqrplan-core": "workspace:*"
   },
   "devDependencies": {
     "@eslint/js": "^9.28.0",
