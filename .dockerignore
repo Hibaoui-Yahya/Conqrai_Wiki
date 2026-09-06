@@ -4,3 +4,6 @@ dist
 /data
 .env*
 .nx
+# Stale incremental build info makes tsc skip emitting inside the image,
+# which produces a container that builds cleanly and dies on boot.
+*.tsbuildinfo

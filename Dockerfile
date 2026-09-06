@@ -37,6 +37,12 @@ COPY --from=builder /app/apps/server/package.json /app/apps/server/package.json
 # Copy packages
 COPY --from=builder /app/packages/editor-ext/dist /app/packages/editor-ext/dist
 COPY --from=builder /app/packages/editor-ext/package.json /app/packages/editor-ext/package.json
+# The server imports @conqr/conqrplan-core at runtime. Without these the image
+# builds and deploys "successfully" and then dies on boot with MODULE_NOT_FOUND
+# - which is exactly what happened, so the workspace package has to be shipped
+# the same way editor-ext is.
+COPY --from=builder /app/packages/conqrplan-core/dist /app/packages/conqrplan-core/dist
+COPY --from=builder /app/packages/conqrplan-core/package.json /app/packages/conqrplan-core/package.json
 
 # Copy root package files
 COPY --from=builder /app/package.json /app/package.json
