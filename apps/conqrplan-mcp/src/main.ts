@@ -1,8 +1,4 @@
-import {
-  ConfigError,
-  loadServiceConfig,
-  loadStaticTenants,
-} from '@conqr/conqrplan-core';
+import { loadServiceConfig, loadStaticTenants } from '@conqr/conqrplan-core';
 import { ConqrPlanMcpApp, createHttpServer, createLogger } from './server';
 
 /**
@@ -18,16 +14,9 @@ async function main(): Promise<void> {
 
   let config;
   let tenants;
-  let inboundSigningKey: string;
   try {
     config = loadServiceConfig();
     tenants = loadStaticTenants();
-    inboundSigningKey = (process.env.CONQR_MCP_INBOUND_KEY ?? '').trim();
-    if (inboundSigningKey.length < 32) {
-      throw new ConfigError(
-        'Missing or too-short CONQR_MCP_INBOUND_KEY (client delegation trust material)',
-      );
-    }
   } catch (err) {
     logger.error('startup refused', { reason: (err as Error).message });
     process.exitCode = 78; // EX_CONFIG
@@ -35,7 +24,7 @@ async function main(): Promise<void> {
   }
 
   const approved = await tenants.all();
-  const app = new ConqrPlanMcpApp({ config, tenants, inboundSigningKey, logger });
+  const app = new ConqrPlanMcpApp({ config, tenants, logger });
   const server = createHttpServer(app);
 
   await new Promise<void>((resolve) =>

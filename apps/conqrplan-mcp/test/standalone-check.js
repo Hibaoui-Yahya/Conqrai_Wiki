@@ -13,14 +13,24 @@
  */
 const http = require('node:http');
 const assert = require('node:assert/strict');
-const { createHash } = require('node:crypto');
+const { createHash, generateKeyPairSync, sign: edSign } = require('node:crypto');
 
 const core = require('../../../packages/conqrplan-core/dist/index.js');
 const { ConqrPlanMcpApp, createHttpServer } = require('../dist/server.js');
 
-const INBOUND_KEY = 'inbound-key-that-is-long-enough-for-validation';
-const OBO_KEY = 'conqrplan-key-that-is-long-enough-for-validation';
 const CLIENT_TOKEN = 'client-token-value';
+const HUB_KID = 'hub-test-key';
+const MCP_KID = 'mcp-test-key';
+
+// Test-only key pairs, generated per run. Nothing here is a production key.
+const hub = generateKeyPairSync('ed25519');
+const mcp = generateKeyPairSync('ed25519');
+const spki = (k) => k.export({ type: 'spki', format: 'pem' });
+const pkcs8 = (k) => k.export({ type: 'pkcs8', format: 'pem' });
+const HUB_PUBLIC = spki(hub.publicKey);
+
+const b64 = (b) =>
+  Buffer.from(b).toString('base64').replace(/[+]/g, '-').replace(/[/]/g, '_').replace(/=+$/, '');
 
 const ORG = 'conqr:org:11111111-1111-1111-1111-111111111111';
 const OTHER_ORG = 'conqr:org:22222222-2222-2222-2222-222222222222';
@@ -47,22 +57,29 @@ function startStubPlane() {
   const seen = [];
   const server = http.createServer((req, res) => {
     const delegation = req.headers['x-conqr-delegation'];
-    let sub = null;
-    let aud = null;
-    let scope = null;
+    let claims = {};
+    let kid = null;
     try {
-      const payload = JSON.parse(
-        Buffer.from(String(delegation).split('.')[1], 'base64url').toString('utf8'),
-      );
-      sub = payload.sub;
-      aud = payload.aud;
-      scope = payload.scope;
+      const parts = String(delegation).split('.');
+      claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      kid = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')).kid ?? null;
     } catch {
-      /* leave null */
+      /* leave empty */
     }
-    seen.push({ url: req.url, apiKey: req.headers['x-api-key'], sub, aud, scope });
+    seen.push({
+      url: req.url,
+      apiKey: req.headers['x-api-key'],
+      sub: claims.sub ?? null,
+      aud: claims.aud ?? null,
+      scope: claims.scope ?? null,
+      iss: claims.iss ?? null,
+      exp: claims.exp ?? null,
+      kid,
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ results: [{ id: PROJECT, name: `seen-by:${sub}` }] }));
+    res.end(
+      JSON.stringify({ results: [{ id: PROJECT, name: `seen-by:${claims.sub ?? null}` }] }),
+    );
   });
   return new Promise((resolve) =>
     server.listen(0, () =>
@@ -71,17 +88,33 @@ function startStubPlane() {
   );
 }
 
+/** An assertion as ConqrHub would issue it: Ed25519, addressed to this service. */
 function inboundToken(personUid, orgUid, opts = {}) {
-  return core.mintDelegation({
-    personUid,
-    orgUid,
-    scope: [core.DELEGATED_SCOPES.workItemRead],
-    signingKey: opts.key ?? INBOUND_KEY,
-    issuer: 'conqrhub',
-    audience: opts.audience ?? 'conqrplan-mcp',
-    ttlSeconds: opts.ttlSeconds ?? 300,
-    now: opts.now,
-  }).token;
+  const now = opts.now ?? Math.floor(Date.now() / 1000);
+  const header = b64(
+    JSON.stringify({
+      alg: opts.alg ?? 'EdDSA',
+      typ: 'CONQR-OBO',
+      kid: opts.kid ?? HUB_KID,
+    }),
+  );
+  const payload = b64(
+    JSON.stringify({
+      sub: personUid,
+      tid: orgUid,
+      aud: opts.audience ?? 'conqrplan-mcp',
+      scope: opts.scope ?? [core.DELEGATED_SCOPES.workItemRead],
+      iat: now,
+      nbf: now,
+      exp: now + (opts.ttlSeconds ?? 300),
+      act: 'obo',
+      iss: opts.issuer ?? 'conqrhub',
+      jti: 'jti-' + Math.random().toString(36).slice(2),
+    }),
+  );
+  const key = opts.signWith ?? hub.privateKey;
+  const sig = b64(edSign(null, Buffer.from(header + '.' + payload), key));
+  return header + '.' + payload + '.' + sig;
 }
 
 async function main() {
@@ -99,9 +132,18 @@ async function main() {
     },
     secrets: {
       planeApiKey: 'plane_api_stub',
-      oboSigningKey: OBO_KEY,
-      oboIssuer: 'conqrhub',
+      // This service signs with its OWN key. It never holds ConqrPlan's.
+      signingPrivateKeyPem: pkcs8(mcp.privateKey),
+      signingKeyId: MCP_KID,
+      issuer: 'conqrplan-mcp',
       oboAudience: 'conqrplan',
+      inboundIssuers: {
+        conqrhub: {
+          issuer: 'conqrhub',
+          algorithm: 'EdDSA',
+          publicKeys: { [HUB_KID]: HUB_PUBLIC },
+        },
+      },
       clientTokenHashes: [createHash('sha256').update(CLIENT_TOKEN).digest('hex')],
     },
   };
@@ -112,7 +154,7 @@ async function main() {
     ],
   });
 
-  const app = new ConqrPlanMcpApp({ config, tenants, inboundSigningKey: INBOUND_KEY });
+  const app = new ConqrPlanMcpApp({ config, tenants });
   const server = createHttpServer(app);
   await new Promise((r) => server.listen(0, r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -188,13 +230,80 @@ async function main() {
     assert.equal((await res.json()).error, 'delegation_wrong_audience');
   });
 
-  await check('a delegation signed with the wrong key is refused', async () => {
+  await check('an assertion signed with the wrong private key is refused', async () => {
     const res = await callProjects({
       Authorization: `Bearer ${CLIENT_TOKEN}`,
-      'X-Conqr-Delegation': inboundToken(ALICE, ORG, { key: OBO_KEY }),
+      'X-Conqr-Delegation': inboundToken(ALICE, ORG, { signWith: mcp.privateKey }),
     });
     assert.equal(res.status, 403);
     assert.equal((await res.json()).error, 'delegation_bad_signature');
+  });
+
+  await check('an unregistered key id is refused', async () => {
+    const res = await callProjects({
+      Authorization: `Bearer ${CLIENT_TOKEN}`,
+      'X-Conqr-Delegation': inboundToken(ALICE, ORG, { kid: 'rotated-out' }),
+    });
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error, 'delegation_unknown_key');
+  });
+
+  await check('an unknown issuer is refused before any key is consulted', async () => {
+    const res = await callProjects({
+      Authorization: `Bearer ${CLIENT_TOKEN}`,
+      'X-Conqr-Delegation': inboundToken(ALICE, ORG, { issuer: 'somebody-else' }),
+    });
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error, 'delegation_wrong_issuer');
+  });
+
+  await check('an algorithm the issuer does not use is refused', async () => {
+    const res = await callProjects({
+      Authorization: `Bearer ${CLIENT_TOKEN}`,
+      'X-Conqr-Delegation': inboundToken(ALICE, ORG, { alg: 'HS256' }),
+    });
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error, 'delegation_bad_algorithm');
+  });
+
+  await check('the downstream token is signed by MCP, not by Hub', async () => {
+    plane.seen.length = 0;
+    await callProjects({
+      Authorization: `Bearer ${CLIENT_TOKEN}`,
+      'X-Conqr-Delegation': inboundToken(ALICE, ORG),
+    });
+    const call = plane.seen.at(-1);
+    assert.equal(call.iss, 'conqrplan-mcp');
+    assert.equal(call.kid, MCP_KID);
+  });
+
+  await check('the downstream token never outlives the assertion', async () => {
+    plane.seen.length = 0;
+    const shortLived = 45;
+    await callProjects({
+      Authorization: `Bearer ${CLIENT_TOKEN}`,
+      'X-Conqr-Delegation': inboundToken(ALICE, ORG, { ttlSeconds: shortLived }),
+    });
+    const call = plane.seen.at(-1);
+    assert.ok(
+      call.exp <= Math.floor(Date.now() / 1000) + shortLived,
+      'downstream expiry exceeded the inbound assertion',
+    );
+  });
+
+  await check('a tool cannot claim a scope the assertion did not carry', async () => {
+    await assert.rejects(
+      () =>
+        app.callTool({
+          toolName: 'create_work_item',
+          args: { projectId: PROJECT, name: 'nope' },
+          bearerToken: CLIENT_TOKEN,
+          delegationToken: inboundToken(ALICE, ORG, {
+            scope: [core.DELEGATED_SCOPES.workItemRead],
+          }),
+        }),
+      (err) => err.classification === 'delegation_insufficient_scope',
+    );
   });
 
   await check('an expired delegation is refused', async () => {
@@ -276,11 +385,7 @@ async function main() {
         { orgUid: ORG, workspaceSlug: 'acme', allowedProjectIds: [PROJECT] },
       ],
     });
-    const narrowApp = new ConqrPlanMcpApp({
-      config,
-      tenants: narrow,
-      inboundSigningKey: INBOUND_KEY,
-    });
+    const narrowApp = new ConqrPlanMcpApp({ config, tenants: narrow });
     await assert.rejects(
       () =>
         narrowApp.callTool({
@@ -318,13 +423,15 @@ async function main() {
     );
   });
 
-  await check('a too-short signing key is refused at load', async () => {
+  await check('a private key that is not a private key is refused at load', async () => {
     assert.throws(
       () =>
         core.loadServiceConfig({
           CONQRPLAN_API_URL: 'https://x.test/api/v1',
           CONQRPLAN_API_KEY: 'k',
-          CONQR_OBO_SIGNING_KEY: 'short',
+          CONQRPLAN_MCP_PRIVATE_KEY_PEM: 'not-a-key',
+          CONQRPLAN_MCP_KEY_ID: 'k1',
+          CONQRPLAN_MCP_INBOUND_ISSUERS: '{"conqrhub":{"algorithm":"EdDSA"}}',
           CONQRPLAN_MCP_CLIENT_TOKEN_SHA256: 'a'.repeat(64),
         }),
       /Invalid secret configuration/,

@@ -12,6 +12,7 @@ import {
   authenticate,
   AuthError,
   callContextFor,
+  inboundPolicyFrom,
 } from './auth';
 
 /**
@@ -67,7 +68,6 @@ class RateLimiter {
 export interface AppOptions {
   config: ServiceConfig;
   tenants: TenantMappingProvider;
-  inboundSigningKey: string;
   client?: PlaneClient;
   logger?: Logger;
   tools?: ToolDefinition[];
@@ -133,7 +133,7 @@ export class ConqrPlanMcpApp {
       bearerToken: params.bearerToken,
       delegationToken: params.delegationToken,
       secrets: this.opts.config.secrets,
-      inboundSigningKey: this.opts.inboundSigningKey,
+      inboundPolicy: inboundPolicyFrom(this.opts.config.secrets),
       tenants: this.opts.tenants,
       now: params.now,
     });

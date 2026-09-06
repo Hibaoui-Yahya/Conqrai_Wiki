@@ -79,10 +79,27 @@ export const secretsSchema = z.object({
    * on a delegated endpoint that carries no valid delegation.
    */
   planeApiKey: z.string().min(1),
-  /** Key the delegation is signed with. Never ConqrHub's APP_SECRET. */
-  oboSigningKey: z.string().min(32, 'signing key is too short to be safe'),
-  oboIssuer: z.string().min(1).default('conqrhub'),
+  /**
+   * This service's own Ed25519 private key, PEM (PKCS#8).
+   *
+   * Deliberately not ConqrPlan's HMAC key. A shared secret makes every holder
+   * an issuer, so holding ConqrPlan's would let this service mint anything
+   * ConqrPlan accepts. The private half stays here; ConqrPlan registers only
+   * the public half.
+   */
+  signingPrivateKeyPem: z.string().includes('PRIVATE KEY'),
+  /** Key id ConqrPlan registers this key under. A selector, never a URL. */
+  signingKeyId: z.string().min(1),
+  /** Issuer name this service signs as. */
+  issuer: z.string().min(1).default('conqrplan-mcp'),
   oboAudience: z.string().min(1).default('conqrplan'),
+  /**
+   * Issuers this service accepts assertions from, as JSON:
+   *   {"<issuer>": {"algorithm": "EdDSA", "publicKeys": {"<kid>": "<PEM>"},
+   *                 "allowedScopes": [...], "maxTtlSeconds": 300}}
+   * An HS256 issuer carries "hmacKey" instead, for the migration window.
+   */
+  inboundIssuers: z.record(z.any()),
   /**
    * Bearer tokens accepted from MCP clients, as sha256 hex digests. Digests
    * rather than the tokens themselves, so a config dump or a log line leaks
@@ -160,6 +177,30 @@ function required(env: NodeJS.ProcessEnv, key: string): string {
  * Throws on anything missing or malformed rather than starting in a state
  * that fails later, per request, in a way that reads like a permissions bug.
  */
+function parseInboundIssuers(raw: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ConfigError('CONQRPLAN_MCP_INBOUND_ISSUERS is not valid JSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ConfigError('CONQRPLAN_MCP_INBOUND_ISSUERS must be an object');
+  }
+  const issuers = parsed as Record<string, { algorithm?: unknown }>;
+  if (!Object.keys(issuers).length) {
+    // No trusted issuer means no request can ever name a human, so the
+    // service would start and refuse everything. Fail here instead.
+    throw new ConfigError('CONQRPLAN_MCP_INBOUND_ISSUERS declares no issuer');
+  }
+  for (const [name, policy] of Object.entries(issuers)) {
+    if (policy?.algorithm !== 'EdDSA' && policy?.algorithm !== 'HS256') {
+      throw new ConfigError(`Issuer ${name} must pin algorithm EdDSA or HS256`);
+    }
+  }
+  return issuers;
+}
+
 export function loadServiceConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): ServiceConfig {
@@ -180,9 +221,11 @@ export function loadServiceConfig(
 
   const secrets = secretsSchema.safeParse({
     planeApiKey: required(env, 'CONQRPLAN_API_KEY'),
-    oboSigningKey: required(env, 'CONQR_OBO_SIGNING_KEY'),
-    oboIssuer: env.CONQR_OBO_ISSUER,
+    signingPrivateKeyPem: required(env, 'CONQRPLAN_MCP_PRIVATE_KEY_PEM'),
+    signingKeyId: required(env, 'CONQRPLAN_MCP_KEY_ID'),
+    issuer: env.CONQRPLAN_MCP_ISSUER,
     oboAudience: env.CONQR_OBO_AUDIENCE,
+    inboundIssuers: parseInboundIssuers(required(env, 'CONQRPLAN_MCP_INBOUND_ISSUERS')),
     clientTokenHashes: (env.CONQRPLAN_MCP_CLIENT_TOKEN_SHA256 ?? '')
       .split(',')
       .map((s) => s.trim().toLowerCase())

@@ -2,12 +2,14 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   DelegatedScope,
   DelegationError,
-  mintDelegation,
+  exchangeDelegation,
   PlaneCallContext,
   Secrets,
   TenantMapping,
   TenantMappingProvider,
-  verifyDelegation,
+  VerifiedAssertion,
+  VerifierPolicy,
+  verifyAssertion,
 } from '@conqr/conqrplan-core';
 
 /**
@@ -21,11 +23,16 @@ import {
  * the service never invents the second one.
  *
  * The delegation a client presents is addressed to this service
- * (aud: conqrplan-mcp). It is verified and then **exchanged** for a fresh
- * token addressed to ConqrPlan, carrying only the scopes the invoked tool
- * declares. It is never forwarded: a token being signed with a key we happen
- * to hold does not make it addressed to ConqrPlan, and passing it on would let
- * one audience's token act at another.
+ * (aud: conqrplan-mcp). It is verified against an issuer-pinned policy and
+ * then **exchanged** for a fresh token addressed to ConqrPlan, signed with
+ * this service's own Ed25519 private key and carrying only the scopes the
+ * invoked tool declares, never outliving the assertion it derives from. It is
+ * never forwarded: a signed token is not thereby addressed to ConqrPlan, and
+ * passing it on would let one audience's token act at another.
+ *
+ * This service does not hold ConqrPlan's HMAC key. It could not mint a
+ * ConqrPlan token without its own registered key pair, and rotating that key
+ * out of ConqrPlan's registry revokes it without touching anyone else.
  *
  * There is no path here that produces an actor from a tool argument. A caller
  * that could name its own person_uid could act as anyone, which is exactly the
@@ -66,16 +73,26 @@ export interface RequestIdentity {
   tenant: TenantMapping;
   /** Correlates the whole exchange across both products' audit trails. */
   correlationId: string;
+  /** The verified inbound assertion, carried so the exchange can narrow to it. */
+  assertion: VerifiedAssertion;
 }
 
 export interface AuthenticateInput {
   bearerToken: string | undefined;
   delegationToken: string | undefined;
   secrets: Secrets;
-  /** Key the client-facing delegation is signed with. */
-  inboundSigningKey: string;
+  /** Issuer-pinned policy for assertions addressed to this service. */
+  inboundPolicy: VerifierPolicy;
   tenants: TenantMappingProvider;
   now?: number;
+}
+
+/** Build the inbound policy from validated configuration. */
+export function inboundPolicyFrom(secrets: Secrets): VerifierPolicy {
+  return {
+    audience: MCP_AUDIENCE,
+    issuers: secrets.inboundIssuers as VerifierPolicy['issuers'],
+  };
 }
 
 /**
@@ -95,12 +112,9 @@ export async function authenticate(
     throw new AuthError(401, 'client_unauthenticated', 'Unrecognised bearer token');
   }
 
-  let claims;
+  let assertion: VerifiedAssertion;
   try {
-    claims = verifyDelegation(input.delegationToken, {
-      signingKey: input.inboundSigningKey,
-      issuer: input.secrets.oboIssuer,
-      audience: MCP_AUDIENCE,
+    assertion = verifyAssertion(input.delegationToken, input.inboundPolicy, {
       now: input.now,
     });
   } catch (err) {
@@ -111,6 +125,7 @@ export async function authenticate(
     throw new AuthError(403, classification);
   }
 
+  const claims = assertion.claims;
   const tenant = await input.tenants.forOrgUid(claims.tid);
   if (!tenant) {
     // Fail closed. An unapproved tenant is refused, never guessed at.
@@ -122,6 +137,7 @@ export async function authenticate(
     orgUid: claims.tid,
     tenant,
     correlationId: claims.jti,
+    assertion,
   };
 }
 
@@ -139,13 +155,13 @@ export function callContextFor(
   secrets: Secrets,
   now?: number,
 ): PlaneCallContext {
-  const minted = mintDelegation({
-    personUid: identity.personUid,
-    orgUid: identity.orgUid,
-    scope: scopes,
-    signingKey: secrets.oboSigningKey,
-    issuer: secrets.oboIssuer,
+  const minted = exchangeDelegation({
+    inbound: identity.assertion,
+    toolScopes: scopes,
     audience: secrets.oboAudience,
+    issuer: secrets.issuer,
+    privateKeyPem: secrets.signingPrivateKeyPem,
+    kid: secrets.signingKeyId,
     now,
   });
   return {
