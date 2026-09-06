@@ -23,10 +23,22 @@ const DEFAULT_LIMIT = 5;
 /**
  * How long a viewer's readable ConqrPlan project set is reused.
  *
- * Short on purpose. Losing access should stop showing results quickly, and the
- * call behind it is one cheap list per viewer, not one per candidate.
+ * This is a *narrowing* cache, not revocation enforcement, and the difference
+ * matters: for up to a minute after a project membership is removed, this set
+ * can still contain that project. Nothing is released on its strength alone -
+ * every candidate that survives it is authorised again, uncached, against
+ * ConqrPlan before any of its content is returned. Treating this cache as the
+ * access decision would give a removed member a minute of read access.
  */
 const PROJECT_ACCESS_TTL_MS = 60_000;
+
+/**
+ * Candidates authorised per request at the content-release boundary.
+ *
+ * Bounded by the caller's limit, so this is a handful of reads, not one per
+ * chunk.
+ */
+const MAX_AUTHORIZATION_CHECKS = 25;
 
 /**
  * Semantic work-item intelligence (gap-analysis A2): duplicate detection and
@@ -89,6 +101,49 @@ export class WorkIntelService {
     }
   }
 
+  /**
+   * Which of these work items ConqrPlan will actually show this viewer, asked
+   * now and never from cache.
+   *
+   * Project membership is not item-level authorization. ConqrPlan restricts
+   * guests in a project configured with guest_view_all_features = False to
+   * work they created, so two people with identical project access can be
+   * entitled to different items inside it. The only reliable answer is the
+   * source product's answer about the specific item, so each candidate is
+   * read back as the viewer and anything refused or missing is dropped.
+   *
+   * Deliberately at the release boundary: after ranking, before any title,
+   * label, state, snippet or link is put in a response or into a prompt.
+   */
+  private async authorizedItemIds(
+    candidates: { workItemId: string; projectId: string | null }[],
+    opts: { userId: string; workspaceId: string },
+  ): Promise<Set<string>> {
+    const allowed = new Set<string>();
+    if (!this.plane.isEnabled()) return allowed;
+
+    const checks = candidates.slice(0, MAX_AUTHORIZATION_CHECKS);
+    await Promise.all(
+      checks.map(async (candidate) => {
+        if (!candidate.projectId) return;
+        try {
+          await this.plane.getWorkItem(
+            candidate.projectId,
+            candidate.workItemId,
+            this.delegation.mintCallContext(opts.userId, opts.workspaceId, [
+              DELEGATED_SCOPES.workItemRead,
+            ]),
+          );
+          allowed.add(candidate.workItemId);
+        } catch {
+          // Refused, deleted, or unreachable. All three mean the same thing
+          // here: this viewer does not get this item's content.
+        }
+      }),
+    );
+    return allowed;
+  }
+
   async findSimilar(opts: {
     workspaceId: string;
     userId: string;
@@ -116,9 +171,12 @@ export class WorkIntelService {
       });
     }
 
-    return Array.from(byItem.values())
+    const ranked = Array.from(byItem.values())
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+
+    const allowed = await this.authorizedItemIds(ranked, opts);
+    return ranked.filter((item) => allowed.has(item.workItemId));
   }
 
   async predictLabels(opts: {
@@ -131,14 +189,34 @@ export class WorkIntelService {
     const raw = await this.retrieve(opts, opts.limit ?? DEFAULT_LIMIT);
 
     // Weight each label by the best chunk score per work item that carries it.
-    const bestPerItem = new Map<string, { score: number; labels: string[] }>();
+    const bestPerItem = new Map<
+      string,
+      { score: number; labels: string[]; projectId: string | null }
+    >();
     for (const r of raw) {
       const meta = (r.metadata ?? {}) as Record<string, unknown>;
       const labels = (meta.labels as string[]) ?? [];
       const existing = bestPerItem.get(r.sourceId);
       if (!existing || r.score > existing.score) {
-        bestPerItem.set(r.sourceId, { score: r.score, labels });
+        bestPerItem.set(r.sourceId, {
+          score: r.score,
+          labels,
+          projectId: (meta.projectId as string) ?? null,
+        });
       }
+    }
+
+    // Labels are content too. A label only this viewer's colleague may see
+    // must not reach the prediction, the response, or the prompt behind it.
+    const allowedLabelItems = await this.authorizedItemIds(
+      Array.from(bestPerItem.entries()).map(([workItemId, v]) => ({
+        workItemId,
+        projectId: (v as { projectId?: string | null }).projectId ?? null,
+      })),
+      opts,
+    );
+    for (const key of Array.from(bestPerItem.keys())) {
+      if (!allowedLabelItems.has(key)) bestPerItem.delete(key);
     }
 
     const weights = new Map<string, number>();

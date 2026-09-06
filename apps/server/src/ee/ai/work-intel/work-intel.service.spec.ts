@@ -1,4 +1,5 @@
 import { WorkIntelService } from './work-intel.service';
+import { PlaneApiError } from '../../../core/integration/services/plane-client.service';
 
 function chunk(
   sourceId: string,
@@ -43,6 +44,10 @@ function makeSvc(results: any[], overrides: Partial<Record<string, any>> = {}) {
   const plane = {
     isEnabled: jest.fn().mockReturnValue(true),
     listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1', name: 'Proj' }]),
+    // Item-level authorisation: the release boundary reads each candidate back
+    // as the viewer. Default fixture lets everything through so the tests that
+    // care about it can say so explicitly.
+    getWorkItem: jest.fn().mockResolvedValue({ id: 'x', name: 'x' }),
     ...overrides.plane,
   };
   const delegation = {
@@ -253,5 +258,124 @@ describe('WorkIntelService — authorisation against ConqrPlan', () => {
     expect(
       await svc.predictLabels({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' }),
     ).toEqual({ labels: [] });
+  });
+});
+
+/**
+ * Project-read does not imply item-read. ConqrPlan restricts a guest in a
+ * project configured with guest_view_all_features = False to work they
+ * created, so two people with identical project access can be entitled to
+ * different items inside it. The project set narrows; only the source
+ * product's answer about the specific item releases content.
+ */
+describe('WorkIntelService — item-level authorisation', () => {
+  it('two users sharing a Hub space get different items', async () => {
+    // Same space, same project, different entitlement inside it.
+    const visibleToAlice = new Set(['a']);
+    const { svc } = makeSvc([chunk('a', 0.9), chunk('b', 0.8)], {
+      plane: {
+        listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]),
+        getWorkItem: jest.fn(async (_p: string, id: string) => {
+          if (!visibleToAlice.has(id)) {
+            throw new PlaneApiError('forbidden', 403, false);
+          }
+          return { id, name: `Item ${id}` };
+        }),
+      },
+    });
+
+    const items = await svc.findSimilar({
+      workspaceId: 'ws-1',
+      userId: 'alice',
+      title: 'Login broken',
+    });
+
+    expect(items.map((i) => i.workItemId)).toEqual(['a']);
+  });
+
+  it('never releases a forbidden title, state, label or link', async () => {
+    const { svc } = makeSvc(
+      [chunk('secret', 0.95, { title: 'Acquisition of NewCo', labels: ['m-and-a'] })],
+      {
+        plane: {
+          listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]),
+          getWorkItem: jest.fn().mockRejectedValue(new PlaneApiError('no', 403, false)),
+        },
+      },
+    );
+
+    const items = await svc.findSimilar({
+      workspaceId: 'ws-1',
+      userId: 'outsider',
+      title: 'acquisition',
+    });
+
+    expect(items).toEqual([]);
+    expect(JSON.stringify(items)).not.toContain('Acquisition of NewCo');
+    expect(JSON.stringify(items)).not.toContain('m-and-a');
+  });
+
+  it('drops an item deleted in the source', async () => {
+    const { svc } = makeSvc([chunk('gone', 0.9)], {
+      plane: {
+        listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]),
+        getWorkItem: jest.fn().mockRejectedValue(new PlaneApiError('gone', 404, false)),
+      },
+    });
+    expect(
+      await svc.findSimilar({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' }),
+    ).toEqual([]);
+  });
+
+  it('releases nothing when ConqrPlan cannot be asked at the boundary', async () => {
+    const { svc } = makeSvc([chunk('a', 0.9)], {
+      plane: {
+        listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]),
+        getWorkItem: jest.fn().mockRejectedValue(new Error('plane down')),
+      },
+    });
+    expect(
+      await svc.findSimilar({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' }),
+    ).toEqual([]);
+  });
+
+  it('authorises against the source per request, not from the project cache', async () => {
+    const getWorkItem = jest.fn().mockResolvedValue({ id: 'a', name: 'a' });
+    const { svc, plane } = makeSvc([chunk('a', 0.9)], {
+      plane: { listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]), getWorkItem },
+    });
+
+    await svc.findSimilar({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' });
+    await svc.findSimilar({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' });
+
+    // The project list may be reused within its window; the item check is not.
+    expect(plane.listProjects).toHaveBeenCalledTimes(1);
+    expect(getWorkItem).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a forbidden item contribute a predicted label', async () => {
+    const { svc } = makeSvc(
+      [
+        chunk('ok', 0.9, { labels: ['bug'] }),
+        chunk('secret', 0.95, { labels: ['confidential'] }),
+      ],
+      {
+        plane: {
+          listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]),
+          getWorkItem: jest.fn(async (_p: string, id: string) => {
+            if (id === 'secret') throw new PlaneApiError('no', 403, false);
+            return { id, name: id };
+          }),
+        },
+      },
+    );
+
+    const { labels } = await svc.predictLabels({
+      workspaceId: 'ws-1',
+      userId: 'user-1',
+      title: 'x',
+    });
+
+    expect(labels.map((l) => l.label)).toEqual(['bug']);
   });
 });
