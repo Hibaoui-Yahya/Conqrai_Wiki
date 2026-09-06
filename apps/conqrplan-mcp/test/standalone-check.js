@@ -17,6 +17,7 @@ const { createHash, generateKeyPairSync, sign: edSign } = require('node:crypto')
 
 const core = require('../../../packages/conqrplan-core/dist/index.js');
 const { ConqrPlanMcpApp, createHttpServer } = require('../dist/server.js');
+const { safeCorrelationId } = require('../dist/auth.js');
 
 const CLIENT_TOKEN = 'client-token-value';
 const HUB_KID = 'hub-test-key';
@@ -74,6 +75,9 @@ function startStubPlane() {
       scope: claims.scope ?? null,
       iss: claims.iss ?? null,
       exp: claims.exp ?? null,
+      jti: claims.jti ?? null,
+      cor: claims.cor ?? null,
+      correlationId: req.headers['x-conqr-correlation-id'] ?? null,
       kid,
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -154,7 +158,15 @@ async function main() {
     ],
   });
 
-  const app = new ConqrPlanMcpApp({ config, tenants });
+  // Captured so the audit line itself can be asserted on, not just its effect.
+  const logged = [];
+  const capturingLogger = {
+    debug: () => {},
+    info: (msg, meta) => logged.push({ level: 'info', msg, ...meta }),
+    warn: (msg, meta) => logged.push({ level: 'warn', msg, ...meta }),
+    error: (msg, meta) => logged.push({ level: 'error', msg, ...meta }),
+  };
+  const app = new ConqrPlanMcpApp({ config, tenants, logger: capturingLogger });
   const server = createHttpServer(app);
   await new Promise((r) => server.listen(0, r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -304,6 +316,124 @@ async function main() {
         }),
       (err) => err.classification === 'delegation_insufficient_scope',
     );
+  });
+
+  await check("the caller's correlation id is carried through to ConqrPlan", async () => {
+    await app.callTool({
+      toolName: 'list_conqrplan_projects',
+      args: {},
+      bearerToken: CLIENT_TOKEN,
+      delegationToken: inboundToken(ALICE, ORG),
+      callerCorrelationId: 'hub-corr-12345',
+    });
+    assert.equal(plane.seen.at(-1).correlationId, 'hub-corr-12345');
+  });
+
+  // The recorder sees the token this service *minted*, whose jti is freshly
+  // generated. The fallback is the *inbound* assertion's jti, so it has to be
+  // read off the token the test issued.
+  const jtiOf = (token) =>
+    JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')).jti;
+
+  await check('without a caller id the assertion jti is used instead', async () => {
+    const token = inboundToken(ALICE, ORG);
+    await app.callTool({
+      toolName: 'list_conqrplan_projects',
+      args: {},
+      bearerToken: CLIENT_TOKEN,
+      delegationToken: token,
+    });
+    assert.equal(plane.seen.at(-1).correlationId, jtiOf(token));
+  });
+
+  await check('a correlation id that could forge a log record is dropped', async () => {
+    const token = inboundToken(ALICE, ORG);
+    const forged = 'ok\n{"level":"info","msg":"forged"}';
+    await app.callTool({
+      toolName: 'list_conqrplan_projects',
+      args: {},
+      bearerToken: CLIENT_TOKEN,
+      delegationToken: token,
+      callerCorrelationId: forged,
+    });
+    const sent = plane.seen.at(-1).correlationId;
+    assert.equal(sent, jtiOf(token), 'unsafe caller id was adopted');
+    assert.ok(!String(sent).includes('\n'), 'a newline reached the downstream header');
+  });
+
+  await check('every unsafe correlation id shape is rejected', async () => {
+    for (const bad of [
+      'ok\n{"level":"info","msg":"forged"}', // log-record injection
+      'ok\r\nX-Injected: 1', // header injection
+      'has space',
+      'tab\there',
+      'null\u0000byte',
+      'vertical\u000Btab',
+      'unicode\u2028separator',
+      '  padded  ', // not trimmed into acceptance
+      'x'.repeat(129), // over the bound
+      ' '.repeat(200) + 'short', // oversized raw, would pass only if trimmed
+      '',
+      'slash/or?query=1',
+      '../../etc/passwd',
+      '$(whoami)',
+      undefined,
+      null,
+      12345,
+      {},
+    ]) {
+      assert.equal(safeCorrelationId(bad), null, `accepted ${JSON.stringify(bad)}`);
+    }
+    for (const good of ['hub-corr-12345', 'a', 'x'.repeat(128), 'A.b_c:d-1']) {
+      assert.equal(safeCorrelationId(good), good, `rejected ${good}`);
+    }
+  });
+
+  await check('the trace carries three distinct identifiers and an outcome', async () => {
+    logged.length = 0;
+    const token = inboundToken(ALICE, ORG);
+    await app.callTool({
+      toolName: 'list_conqrplan_projects',
+      args: {},
+      bearerToken: CLIENT_TOKEN,
+      delegationToken: token,
+      callerCorrelationId: 'hub-trace-1',
+    });
+    const line = logged.find((l) => l.msg === 'tool call');
+    assert.ok(line, 'no trace line was emitted');
+    for (const field of [
+      'tool',
+      'service',
+      'caller',
+      'personUid',
+      'orgUid',
+      'correlationId',
+      'assertionJti',
+      'delegationJti',
+      'outcome',
+      'durationMs',
+    ]) {
+      assert.ok(line[field] !== undefined, `trace is missing ${field}`);
+    }
+    assert.equal(line.outcome, 'ok');
+    assert.equal(line.caller, 'conqrhub');
+    assert.equal(line.correlationId, 'hub-trace-1');
+    assert.equal(line.assertionJti, jtiOf(token));
+    // Three questions, three answers. Collapsing them loses replay analysis.
+    assert.notEqual(line.delegationJti, line.assertionJti);
+    assert.notEqual(line.delegationJti, line.correlationId);
+    // The downstream token the recorder saw is the one the trace names.
+    assert.equal(plane.seen.at(-1).jti, line.delegationJti);
+    // ...and that token points back at the assertion it came from.
+    assert.equal(plane.seen.at(-1).cor, line.assertionJti);
+  });
+
+  await check('no credential or content reaches the trace', async () => {
+    const line = logged.find((l) => l.msg === 'tool call');
+    const text = JSON.stringify(line);
+    assert.ok(!text.includes(CLIENT_TOKEN), 'client token leaked into the trace');
+    assert.ok(!text.includes('.'.repeat(0) + PROJECT), 'project id leaked into the trace');
+    assert.ok(!/eyJ[A-Za-z0-9_-]{6,}/.test(text), 'a JWT leaked into the trace');
   });
 
   await check('an expired delegation is refused', async () => {

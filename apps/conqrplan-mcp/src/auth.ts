@@ -84,7 +84,39 @@ export interface AuthenticateInput {
   /** Issuer-pinned policy for assertions addressed to this service. */
   inboundPolicy: VerifierPolicy;
   tenants: TenantMappingProvider;
+  /**
+   * The caller's own correlation id, if it sent one.
+   *
+   * Without this the two products log different ids for the same call - the
+   * caller's, and this service's fallback - and the audit trails cannot be
+   * joined by id at all, which is the one thing a correlation id is for.
+   */
+  callerCorrelationId?: string;
   now?: number;
+}
+
+/**
+ * A caller-supplied correlation id, or null if it is not safe to adopt.
+ *
+ * This value is attacker-controlled: it arrives in a header and ends up in
+ * log lines and in an outbound header to ConqrPlan. A newline in a log line
+ * forges a second log record, so the charset is an allow-list rather than an
+ * escape, and the length is bounded. Anything else is dropped in favour of
+ * the assertion's jti - a refusal here would turn a cosmetic header into a
+ * failed tool call.
+ */
+export function safeCorrelationId(value: string | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  // Length is checked on the raw value, before any normalisation, so a huge
+  // header cannot be whittled down into an acceptable one.
+  if (value.length < 1 || value.length > 128) return null;
+  // Deliberately not trimmed. Trimming would silently accept a value that is
+  // not what the caller sent, and " x " and "x" would log as the same id
+  // while being different headers on the wire. The allow-list excludes every
+  // space, tab, newline, carriage return and control character outright, so
+  // header and log-record injection are impossible by construction rather
+  // than by escaping.
+  return /^[A-Za-z0-9._:-]+$/.test(value) ? value : null;
 }
 
 /** Build the inbound policy from validated configuration. */
@@ -136,7 +168,10 @@ export async function authenticate(
     personUid: claims.sub,
     orgUid: claims.tid,
     tenant,
-    correlationId: claims.jti,
+    // The caller's id when it sent a usable one, so both products' audit
+    // trails carry the same value. The jti remains the fallback, and remains
+    // what identifies the assertion itself.
+    correlationId: safeCorrelationId(input.callerCorrelationId) ?? claims.jti,
     assertion,
   };
 }
@@ -154,7 +189,7 @@ export function callContextFor(
   scopes: DelegatedScope[],
   secrets: Secrets,
   now?: number,
-): PlaneCallContext {
+): PlaneCallContext & { delegationJti: string } {
   const minted = exchangeDelegation({
     inbound: identity.assertion,
     toolScopes: scopes,
@@ -168,6 +203,12 @@ export function callContextFor(
     delegation: minted.token,
     correlationId: identity.correlationId,
     workspaceSlug: identity.tenant.workspaceSlug,
+    // Surfaced so the audit line can name the token it minted without ever
+    // logging the token. Three identifiers answer three different questions -
+    // which distributed operation (correlationId), which inbound assertion
+    // (its jti), which downstream token (this one) - and collapsing them into
+    // one value would destroy replay analysis on either token.
+    delegationJti: minted.jti,
   };
 }
 

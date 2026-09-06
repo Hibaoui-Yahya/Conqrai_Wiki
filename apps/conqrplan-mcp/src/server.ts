@@ -124,6 +124,7 @@ export class ConqrPlanMcpApp {
     args: unknown;
     bearerToken?: string;
     delegationToken?: string;
+    callerCorrelationId?: string;
     now?: number;
   }): Promise<unknown> {
     const tool = this.byName.get(params.toolName);
@@ -135,6 +136,7 @@ export class ConqrPlanMcpApp {
       secrets: this.opts.config.secrets,
       inboundPolicy: inboundPolicyFrom(this.opts.config.secrets),
       tenants: this.opts.tenants,
+      callerCorrelationId: params.callerCorrelationId,
       now: params.now,
     });
 
@@ -159,17 +161,40 @@ export class ConqrPlanMcpApp {
     );
 
     const startedAt = Date.now();
-    const result = await tool.handler(parsed.data, { client: this.client, call });
-    this.logger.info('tool call', {
+    // Identifiers, never content: a log line must not become a second copy of
+    // the data the permission checks just gated.
+    const trace = {
       tool: tool.name,
-      // Identifiers, never content: a log line must not become a second copy
-      // of the data the permission checks just gated.
+      service: this.opts.config.deployment.serviceName,
+      // Who called, taken from the verified assertion rather than from any
+      // header a caller could set.
+      caller: identity.assertion.claims.iss,
       personUid: identity.personUid,
       orgUid: identity.orgUid,
       correlationId: identity.correlationId,
-      durationMs: Date.now() - startedAt,
-    });
-    return result;
+      // Distinct on purpose - see callContextFor.
+      assertionJti: identity.assertion.claims.jti,
+      delegationJti: call.delegationJti,
+    };
+    try {
+      const result = await tool.handler(parsed.data, { client: this.client, call });
+      this.logger.info('tool call', {
+        ...trace,
+        outcome: 'ok',
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (err) {
+      // A handler that throws produced no line at all before, so a failing
+      // tool was invisible in exactly the situation the trace is for.
+      this.logger.warn('tool call', {
+        ...trace,
+        outcome: 'error',
+        error: (err as Error).name,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
   }
 }
 
@@ -244,6 +269,8 @@ export function createHttpServer(app: ConqrPlanMcpApp): Server {
           bearerToken: bearer(req),
           delegationToken:
             (req.headers['x-conqr-delegation'] as string | undefined) ?? undefined,
+          callerCorrelationId:
+            (req.headers['x-conqr-correlation-id'] as string | undefined) ?? undefined,
         });
         return send(res, 200, {
           jsonrpc: '2.0',
