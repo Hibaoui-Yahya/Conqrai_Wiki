@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { toolsMissingRecovery } from '@conqr/conqrplan-core';
 import {
   ConqrPlanToolRouter,
   RoutingUnavailableError,
@@ -154,7 +155,7 @@ describe('ConqrPlanToolRouter — outcome classification', () => {
       return Promise.reject(err);
     });
     await expect(makeRouter().callRemote(create)).rejects.toThrow(
-      'reading back external_id req:page#block|project:p',
+      'Idempotency key: req:page#block|project:p',
     );
   });
 
@@ -235,5 +236,61 @@ describe('ConqrPlanToolRouter — assertion', () => {
     expect(payload.exp - payload.iat).toBe(120);
     expect(captured.headers.Authorization).toBe('Bearer client-token');
     expect(captured.headers['X-Conqr-Correlation-Id']).toBeTruthy();
+  });
+});
+
+/**
+ * "Read it back by external_id" is only true for create. Telling an operator
+ * that after a failed update or comment is confidently wrong advice, which is
+ * worse than none.
+ */
+describe('ConqrPlanToolRouter — operation-specific recovery', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  const uncertain = async (toolName: string): Promise<any> => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: 'internal_error' }), { status: 502 }) as any,
+    );
+    return makeRouter()
+      .callRemote({ ...create, toolName })
+      .catch((e: any) => e);
+  };
+
+  it('every mutating tool has a recorded recovery procedure', () => {
+    // A gap here is a tool nobody can safely recover, which is exactly the
+    // situation this table exists to prevent.
+    expect(toolsMissingRecovery()).toEqual([]);
+  });
+
+  it('a create points at the idempotency key', async () => {
+    const err = await uncertain('create_work_item');
+    expect(err.message).toMatch(/Operation type: create/);
+    expect(err.message).toMatch(/external_id/);
+  });
+
+  it('an update does not claim the key resolves it', async () => {
+    const err = await uncertain('update_work_item');
+    expect(err.message).toMatch(/Operation type: update/);
+    expect(err.message).toMatch(/recent activity/);
+    expect(err.message).toMatch(/overwrite their change/);
+  });
+
+  it('a bulk create recovers per row and preserves partial results', async () => {
+    const err = await uncertain('bulk_create_work_items');
+    expect(err.message).toMatch(/Operation type: bulk-create/);
+    expect(err.message).toMatch(/each row independently/);
+    expect(err.message).toMatch(/created a second time/);
+  });
+
+  it('a comment warns that a blind retry duplicates it publicly', async () => {
+    const err = await uncertain('add_work_item_comment');
+    expect(err.message).toMatch(/Operation type: comment/);
+    expect(err.message).toMatch(/duplicates the comment/);
+  });
+
+  it('an estimate change says to check both activation markers', async () => {
+    const err = await uncertain('activate_estimate_system');
+    expect(err.message).toMatch(/Operation type: estimate-config/);
+    expect(err.message).toMatch(/both activation markers/);
   });
 });

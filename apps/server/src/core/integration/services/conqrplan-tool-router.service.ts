@@ -3,6 +3,7 @@ import { createPrivateKey, randomUUID, sign as edSign } from 'node:crypto';
 import {
   isMutatingTool,
   PRE_DISPATCH_REFUSALS,
+  recoveryFor,
   scopesForTool,
 } from '@conqr/conqrplan-core';
 import { EnvironmentService } from '../../../integrations/environment/environment.service';
@@ -32,11 +33,14 @@ export class UncertainMutationError extends Error {
     readonly idempotencyKey: string | undefined,
     cause: string,
   ) {
+    const guidance = recoveryFor(toolName);
+    // Operation-specific, because "read it back by external_id" is only true
+    // for create and is actively misleading for an update or a comment.
     super(
       `ConqrPlan tool ${toolName} did not report an outcome (${cause}). ` +
-        (idempotencyKey
-          ? `Resolve by reading back external_id ${idempotencyKey} before retrying.`
-          : 'Read the work item back before retrying; do not create it again.'),
+        `Operation type: ${guidance.kind}. ${guidance.evidence} ${guidance.safeRecovery}` +
+        (idempotencyKey ? ` Idempotency key: ${idempotencyKey}.` : '') +
+        ` Unsafe to retry when: ${guidance.unsafeRetryWhen}`,
     );
     this.name = 'UncertainMutationError';
   }
