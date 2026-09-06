@@ -2,6 +2,7 @@ import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http
 import { randomUUID } from 'node:crypto';
 import {
   CONQRPLAN_TOOLS,
+  DelegationError,
   PlaneClient,
   ServiceConfig,
   TenantMappingProvider,
@@ -288,6 +289,19 @@ export function createHttpServer(app: ConqrPlanMcpApp): Server {
           classification: err.classification,
         });
         return send(res, err.status, { error: err.classification, message: err.message });
+      }
+      if (err instanceof DelegationError) {
+        // An authorization decision, not a fault. It reached here because the
+        // exchange refuses to mint a token for a scope the assertion never
+        // carried - which is the delegation contract working. Reporting that
+        // as a 500 tells the caller to retry something that will never
+        // succeed, and buries the real reason under "internal error".
+        app.logger.warn('request refused', {
+          requestId,
+          status: 403,
+          classification: err.classification,
+        });
+        return send(res, 403, { error: err.classification, message: err.message });
       }
       app.logger.error('request failed', {
         requestId,
