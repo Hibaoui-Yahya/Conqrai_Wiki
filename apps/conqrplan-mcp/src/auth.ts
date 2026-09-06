@@ -84,7 +84,32 @@ export interface AuthenticateInput {
   /** Issuer-pinned policy for assertions addressed to this service. */
   inboundPolicy: VerifierPolicy;
   tenants: TenantMappingProvider;
+  /**
+   * The caller's own correlation id, if it sent one.
+   *
+   * Without this the two products log different ids for the same call - the
+   * caller's, and this service's fallback - and the audit trails cannot be
+   * joined by id at all, which is the one thing a correlation id is for.
+   */
+  callerCorrelationId?: string;
   now?: number;
+}
+
+/**
+ * A caller-supplied correlation id, or null if it is not safe to adopt.
+ *
+ * This value is attacker-controlled: it arrives in a header and ends up in
+ * log lines and in an outbound header to ConqrPlan. A newline in a log line
+ * forges a second log record, so the charset is an allow-list rather than an
+ * escape, and the length is bounded. Anything else is dropped in favour of
+ * the assertion's jti - a refusal here would turn a cosmetic header into a
+ * failed tool call.
+ */
+export function safeCorrelationId(value: string | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > 128) return null;
+  return /^[A-Za-z0-9._:-]+$/.test(trimmed) ? trimmed : null;
 }
 
 /** Build the inbound policy from validated configuration. */
@@ -136,7 +161,10 @@ export async function authenticate(
     personUid: claims.sub,
     orgUid: claims.tid,
     tenant,
-    correlationId: claims.jti,
+    // The caller's id when it sent a usable one, so both products' audit
+    // trails carry the same value. The jti remains the fallback, and remains
+    // what identifies the assertion itself.
+    correlationId: safeCorrelationId(input.callerCorrelationId) ?? claims.jti,
     assertion,
   };
 }

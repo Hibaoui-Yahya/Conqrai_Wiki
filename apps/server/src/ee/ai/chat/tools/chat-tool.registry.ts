@@ -42,14 +42,38 @@ export class ChatToolRegistry {
     // through this method, so a configuration change mid-flight cannot move a
     // request onto the other route part-way: it affects only later requests.
     const route = this.router ? this.router.routeFor(tool.name) : 'local';
-    if (route === 'local') {
-      return tool.execute(args, ctx);
-    }
-
     const correlationId = randomUUID();
     const personUid = toPersonUid(ctx.user.id);
     const orgUid = toOrgUid(ctx.workspaceId);
     const startedAt = Date.now();
+
+    if (route === 'local') {
+      // Logged too, but only for the tools that *could* have been routed.
+      // Without this there is no baseline to compare a rollout against, and -
+      // worse - a tool that silently stops being routed produces no line at
+      // all, so the downgrade looks identical to no traffic. Restricting it to
+      // routable tools keeps every other tool call out of the log.
+      if (!this.router?.isRoutable(tool.name)) return tool.execute(args, ctx);
+      const base = { tool: tool.name, route, correlationId, actor: personUid, tenant: orgUid };
+      try {
+        const result = await tool.execute(args, ctx);
+        this.logger.log(
+          JSON.stringify({ ...base, outcome: 'ok', durationMs: Date.now() - startedAt }),
+        );
+        return result;
+      } catch (err) {
+        this.logger.warn(
+          JSON.stringify({
+            ...base,
+            outcome: 'error',
+            error: (err as Error).name,
+            durationMs: Date.now() - startedAt,
+          }),
+        );
+        throw err;
+      }
+    }
+
     // Identifiers only. A routing log must not become a second copy of the
     // data the permission checks just gated, nor of any credential.
     const base = {

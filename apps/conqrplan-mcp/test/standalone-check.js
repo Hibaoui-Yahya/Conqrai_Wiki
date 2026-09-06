@@ -74,6 +74,8 @@ function startStubPlane() {
       scope: claims.scope ?? null,
       iss: claims.iss ?? null,
       exp: claims.exp ?? null,
+      jti: claims.jti ?? null,
+      correlationId: req.headers['x-conqr-correlation-id'] ?? null,
       kid,
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -304,6 +306,49 @@ async function main() {
         }),
       (err) => err.classification === 'delegation_insufficient_scope',
     );
+  });
+
+  await check("the caller's correlation id is carried through to ConqrPlan", async () => {
+    await app.callTool({
+      toolName: 'list_conqrplan_projects',
+      args: {},
+      bearerToken: CLIENT_TOKEN,
+      delegationToken: inboundToken(ALICE, ORG),
+      callerCorrelationId: 'hub-corr-12345',
+    });
+    assert.equal(plane.seen.at(-1).correlationId, 'hub-corr-12345');
+  });
+
+  // The recorder sees the token this service *minted*, whose jti is freshly
+  // generated. The fallback is the *inbound* assertion's jti, so it has to be
+  // read off the token the test issued.
+  const jtiOf = (token) =>
+    JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')).jti;
+
+  await check('without a caller id the assertion jti is used instead', async () => {
+    const token = inboundToken(ALICE, ORG);
+    await app.callTool({
+      toolName: 'list_conqrplan_projects',
+      args: {},
+      bearerToken: CLIENT_TOKEN,
+      delegationToken: token,
+    });
+    assert.equal(plane.seen.at(-1).correlationId, jtiOf(token));
+  });
+
+  await check('a correlation id that could forge a log record is dropped', async () => {
+    const token = inboundToken(ALICE, ORG);
+    const forged = 'ok\n{"level":"info","msg":"forged"}';
+    await app.callTool({
+      toolName: 'list_conqrplan_projects',
+      args: {},
+      bearerToken: CLIENT_TOKEN,
+      delegationToken: token,
+      callerCorrelationId: forged,
+    });
+    const sent = plane.seen.at(-1).correlationId;
+    assert.equal(sent, jtiOf(token), 'unsafe caller id was adopted');
+    assert.ok(!String(sent).includes('\n'), 'a newline reached the downstream header');
   });
 
   await check('an expired delegation is refused', async () => {

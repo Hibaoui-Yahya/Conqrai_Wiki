@@ -124,6 +124,7 @@ export class ConqrPlanMcpApp {
     args: unknown;
     bearerToken?: string;
     delegationToken?: string;
+    callerCorrelationId?: string;
     now?: number;
   }): Promise<unknown> {
     const tool = this.byName.get(params.toolName);
@@ -135,6 +136,7 @@ export class ConqrPlanMcpApp {
       secrets: this.opts.config.secrets,
       inboundPolicy: inboundPolicyFrom(this.opts.config.secrets),
       tenants: this.opts.tenants,
+      callerCorrelationId: params.callerCorrelationId,
       now: params.now,
     });
 
@@ -244,6 +246,8 @@ export function createHttpServer(app: ConqrPlanMcpApp): Server {
           bearerToken: bearer(req),
           delegationToken:
             (req.headers['x-conqr-delegation'] as string | undefined) ?? undefined,
+          callerCorrelationId:
+            (req.headers['x-conqr-correlation-id'] as string | undefined) ?? undefined,
         });
         return send(res, 200, {
           jsonrpc: '2.0',
