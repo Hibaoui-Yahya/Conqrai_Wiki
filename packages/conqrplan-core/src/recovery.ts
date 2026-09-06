@@ -59,7 +59,7 @@ const BY_TOOL: Record<string, RecoveryGuidance> = {
     evidence:
       'List work items filtered by external_id/external_source; ConqrPlan returns the existing item if the create landed.',
     safeRecovery:
-      'If the item exists under the key, adopt it as the result. If it does not, the create may be retried with the same externalId.',
+      'If the item exists under the key, adopt it as the result. If it does not, the create may be retried with the same externalId - the key is what makes the retry safe, not the read.',
     unsafeRetryWhen:
       'The call carried no externalId. There is then no way to tell a lost create from a duplicated one; ask a human before creating again.',
   },
@@ -89,9 +89,9 @@ const BY_TOOL: Record<string, RecoveryGuidance> = {
     evidence:
       'List the work item comments and look for this actor posting this text around the attempt time.',
     safeRecovery:
-      'If the comment is present, treat it as posted. If not, it may be posted again.',
+      'If the comment is present, treat it as posted. If it is absent, that does NOT prove the first request will not still complete - an in-flight request can land after the read. Wait past the request timeout and read again before considering a repost, and prefer asking the author.',
     unsafeRetryWhen:
-      'The comment thread cannot be read. A blind retry duplicates the comment visibly for the whole project.',
+      'Immediately after an absent read, or when the thread cannot be read at all. A blind retry duplicates the comment visibly for the whole project.',
   },
   create_estimate_system: {
     kind: 'estimate-config',

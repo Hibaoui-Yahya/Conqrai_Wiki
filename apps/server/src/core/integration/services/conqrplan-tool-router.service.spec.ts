@@ -286,6 +286,8 @@ describe('ConqrPlanToolRouter — operation-specific recovery', () => {
     const err = await uncertain('add_work_item_comment');
     expect(err.message).toMatch(/Operation type: comment/);
     expect(err.message).toMatch(/duplicates the comment/);
+    // Absence on an immediate read is not proof the first request died.
+    expect(err.message).toMatch(/does NOT prove the first request will not still complete/);
   });
 
   it('an estimate change says to check both activation markers', async () => {
