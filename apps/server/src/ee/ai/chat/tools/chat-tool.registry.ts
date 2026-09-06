@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { ToolSet } from 'ai';
 import { ChatTool, ChatToolContext } from './chat-tool.types';
 
@@ -22,38 +23,68 @@ export class ChatToolRegistry {
    * surface cannot drift apart on which implementation answered. A tool the
    * router does not own, or one routed locally, runs exactly as before.
    */
-  async executeTool(
-    tool: ChatTool,
-    args: unknown,
-    ctx: ChatToolContext,
-  ): Promise<unknown> {
-    if (!this.router || this.router.routeFor(tool.name) !== 'mcp') {
-      return tool.execute(args, ctx);
-    }
-    return this.router.callRemote({
-      toolName: tool.name,
-      args: (args ?? {}) as Record<string, unknown>,
-      personUid: toPersonUid(ctx.user.id),
-      orgUid: toOrgUid(ctx.workspaceId),
-      idempotencyKey: (args as { externalId?: string })?.externalId,
-    });
-  }
-
   register(chatTool: ChatTool): void {
     this.tools.push(chatTool);
   }
 
   /**
-   * Converts the registry into a ToolSet that the AI SDK's
-   * `streamText({ tools })` parameter expects.
-   * Each tool's `execute` is closed over the provided context so the
-   * model can never invoke a tool as a different user.
+   * Run a tool through the routing decision.
    *
-   * Per ai@6 SDK behaviour (dist/index.js:2913-2933, 3992-4006), thrown
-   * errors from execute() are caught by the SDK and emitted as 'tool-error'
-   * parts which are auto-converted to tool-result entries in the next
-   * step's prompt — so we let throws propagate, only wrapping for logging.
+   * The single place tool execution happens, so the chat surface and the MCP
+   * surface cannot drift apart on which implementation answered.
    */
+  async executeTool(
+    tool: ChatTool,
+    args: unknown,
+    ctx: ChatToolContext,
+  ): Promise<unknown> {
+    // Selected once, here, for the whole request. Both dispatch surfaces come
+    // through this method, so a configuration change mid-flight cannot move a
+    // request onto the other route part-way: it affects only later requests.
+    const route = this.router ? this.router.routeFor(tool.name) : 'local';
+    if (route === 'local') {
+      return tool.execute(args, ctx);
+    }
+
+    const correlationId = randomUUID();
+    const personUid = toPersonUid(ctx.user.id);
+    const orgUid = toOrgUid(ctx.workspaceId);
+    const startedAt = Date.now();
+    // Identifiers only. A routing log must not become a second copy of the
+    // data the permission checks just gated, nor of any credential.
+    const base = {
+      tool: tool.name,
+      route,
+      correlationId,
+      actor: personUid,
+      tenant: orgUid,
+    };
+    try {
+      const result = await this.router!.callRemote({
+        toolName: tool.name,
+        args: (args ?? {}) as Record<string, unknown>,
+        personUid,
+        orgUid,
+        correlationId,
+        idempotencyKey: (args as { externalId?: string })?.externalId,
+      });
+      this.logger.log(
+        JSON.stringify({ ...base, outcome: 'ok', durationMs: Date.now() - startedAt }),
+      );
+      return result;
+    } catch (err) {
+      this.logger.warn(
+        JSON.stringify({
+          ...base,
+          outcome: (err as { uncertain?: boolean }).uncertain ? 'uncertain' : 'error',
+          error: (err as Error).name,
+          durationMs: Date.now() - startedAt,
+        }),
+      );
+      throw err;
+    }
+  }
+
   toAiSdkTools(ctx: ChatToolContext): ToolSet {
     const result: ToolSet = {};
     for (const t of this.tools) {
