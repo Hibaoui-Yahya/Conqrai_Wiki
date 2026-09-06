@@ -38,12 +38,27 @@ function makeSvc(results: any[], overrides: Partial<Record<string, any>> = {}) {
     getUserSpaceIds: jest.fn().mockResolvedValue(['space-1']),
     ...overrides.spaceMemberRepo,
   };
+  // Retrieval is authorised against ConqrPlan, not just Hub space membership,
+  // so the default fixture is a viewer ConqrPlan will show 'proj-1' to.
+  const plane = {
+    isEnabled: jest.fn().mockReturnValue(true),
+    listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1', name: 'Proj' }]),
+    ...overrides.plane,
+  };
+  const delegation = {
+    mintCallContext: jest
+      .fn()
+      .mockReturnValue({ delegation: 'obo-token', correlationId: 'corr-1' }),
+    ...overrides.delegation,
+  };
   const svc = new WorkIntelService(
     aiProvider as any,
     repo as any,
     spaceMemberRepo as any,
+    plane as any,
+    delegation as any,
   );
-  return { svc, aiProvider, repo, spaceMemberRepo };
+  return { svc, aiProvider, repo, spaceMemberRepo, plane, delegation };
 }
 
 describe('WorkIntelService', () => {
@@ -158,5 +173,85 @@ describe('WorkIntelService', () => {
       description: 'Desc',
     });
     expect(aiProvider.embedMany).toHaveBeenCalledWith(['Title\n\nDesc']);
+  });
+});
+
+/**
+ * Work items are indexed into the Hub space their project is mapped to, and
+ * indexing runs as the person who created that mapping. Scoping retrieval by
+ * space membership alone therefore hands one person's visible work to every
+ * member of the space - including to a model. The source product has to
+ * authorise the viewer.
+ */
+describe('WorkIntelService — authorisation against ConqrPlan', () => {
+  it('asks ConqrPlan as the viewer, not as the bridge', async () => {
+    const { svc, delegation } = makeSvc([chunk('a', 0.9)]);
+
+    await svc.findSimilar({
+      workspaceId: 'ws-1',
+      userId: 'user-1',
+      title: 'Login broken',
+    });
+
+    expect(delegation.mintCallContext).toHaveBeenCalledWith('user-1', 'ws-1', [
+      'work-item:read',
+    ]);
+  });
+
+  it('drops work items in a project the viewer cannot read', async () => {
+    const { svc } = makeSvc(
+      [chunk('a', 0.9, { projectId: 'proj-1' }), chunk('b', 0.8, { projectId: 'proj-secret' })],
+      { plane: { listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]) } },
+    );
+
+    const items = await svc.findSimilar({
+      workspaceId: 'ws-1',
+      userId: 'user-1',
+      title: 'Login broken',
+    });
+
+    expect(items.map((i) => i.workItemId)).toEqual(['a']);
+  });
+
+  it('returns nothing when the viewer can read no ConqrPlan project', async () => {
+    // An unmapped person, or one with no project membership. Hub space
+    // membership must not be enough on its own.
+    const { svc, repo } = makeSvc([chunk('a', 0.9)], {
+      plane: { listProjects: jest.fn().mockResolvedValue([]) },
+    });
+
+    expect(
+      await svc.findSimilar({ workspaceId: 'ws-1', userId: 'outsider', title: 'x' }),
+    ).toEqual([]);
+    expect(repo.similaritySearch).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when ConqrPlan cannot be asked', async () => {
+    const { svc } = makeSvc([chunk('a', 0.9)], {
+      plane: { listProjects: jest.fn().mockRejectedValue(new Error('plane down')) },
+    });
+
+    expect(
+      await svc.findSimilar({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' }),
+    ).toEqual([]);
+  });
+
+  it('drops a chunk that cannot say which project it belongs to', async () => {
+    const { svc } = makeSvc([chunk('a', 0.9, { projectId: undefined })]);
+
+    expect(
+      await svc.findSimilar({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' }),
+    ).toEqual([]);
+  });
+
+  it('does not leak labels through predict-labels either', async () => {
+    const { svc } = makeSvc(
+      [chunk('b', 0.8, { projectId: 'proj-secret', labels: ['confidential'] })],
+      { plane: { listProjects: jest.fn().mockResolvedValue([{ id: 'proj-1' }]) } },
+    );
+
+    expect(
+      await svc.predictLabels({ workspaceId: 'ws-1', userId: 'user-1', title: 'x' }),
+    ).toEqual({ labels: [] });
   });
 });

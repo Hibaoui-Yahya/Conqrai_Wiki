@@ -2,6 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { AiProviderService } from '../providers/ai-provider.service';
 import { EmbeddingRepository } from '../embeddings/embedding.repository';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
+import { PlaneClientService } from '../../../core/integration/services/plane-client.service';
+import { DelegatedTokenService } from '../../../core/integration/services/delegated-token.service';
+import { DELEGATED_SCOPES } from '../../../core/integration/domain/delegated-token.util';
 
 export interface SimilarWorkItem {
   workItemId: string;
@@ -18,17 +21,73 @@ const OVERSAMPLE = 4; // chunks-per-item headroom before grouping
 const DEFAULT_LIMIT = 5;
 
 /**
+ * How long a viewer's readable ConqrPlan project set is reused.
+ *
+ * Short on purpose. Losing access should stop showing results quickly, and the
+ * call behind it is one cheap list per viewer, not one per candidate.
+ */
+const PROJECT_ACCESS_TTL_MS = 60_000;
+
+/**
  * Semantic work-item intelligence (gap-analysis A2): duplicate detection and
  * label prediction over the plane_work_item embedding space. Consumed by
  * ConqrPlan's create-work-item and intake surfaces.
  */
 @Injectable()
 export class WorkIntelService {
+  /** viewer -> the ConqrPlan projects they may read */
+  private readonly projectAccessCache = new Map<
+    string,
+    { at: number; projectIds: Set<string> }
+  >();
+
   constructor(
     private readonly aiProvider: AiProviderService,
     private readonly repo: EmbeddingRepository,
     private readonly spaceMemberRepo: SpaceMemberRepo,
+    private readonly plane: PlaneClientService,
+    private readonly delegation: DelegatedTokenService,
   ) {}
+
+  /**
+   * The ConqrPlan projects this viewer may actually read, asked as the viewer.
+   *
+   * Hub space membership is not an answer to this question. Work items are
+   * indexed into the space their project is mapped to, and indexing runs as
+   * the person who created that mapping - so the index can hold items only
+   * that person could see. Scoping retrieval by space membership alone then
+   * hands those titles, states and labels to every member of the space, and
+   * feeds them to a model. The source product owns this decision, so ask it.
+   *
+   * An unmapped or unauthorised viewer gets an empty set and therefore no
+   * results, rather than falling back to anything broader.
+   */
+  private async readableProjectIds(
+    userId: string,
+    workspaceId: string,
+  ): Promise<Set<string>> {
+    const key = `${workspaceId}:${userId}`;
+    const cached = this.projectAccessCache.get(key);
+    if (cached && Date.now() - cached.at < PROJECT_ACCESS_TTL_MS) {
+      return cached.projectIds;
+    }
+    if (!this.plane.isEnabled()) return new Set();
+
+    try {
+      const projects = await this.plane.listProjects(
+        this.delegation.mintCallContext(userId, workspaceId, [
+          DELEGATED_SCOPES.workItemRead,
+        ]),
+      );
+      const projectIds = new Set(projects.map((p) => String(p.id)));
+      this.projectAccessCache.set(key, { at: Date.now(), projectIds });
+      return projectIds;
+    } catch {
+      // Fail closed. A ConqrPlan outage means we cannot establish what this
+      // viewer may see, and "cannot check" must never read as "allowed".
+      return new Set();
+    }
+  }
 
   async findSimilar(opts: {
     workspaceId: string;
@@ -121,15 +180,33 @@ export class WorkIntelService {
     const spaceIds = await this.spaceMemberRepo.getUserSpaceIds(opts.userId);
     if (spaceIds.length === 0) return [];
 
+    // Both boundaries must hold, and they answer different questions. Space
+    // membership says the viewer may see this corner of the Hub; the project
+    // set says ConqrPlan will show them this work. Neither substitutes for
+    // the other, so a result has to clear both.
+    const readableProjects = await this.readableProjectIds(
+      opts.userId,
+      opts.workspaceId,
+    );
+    if (readableProjects.size === 0) return [];
+
     const query = [opts.title, opts.description].filter(Boolean).join('\n\n');
     if (!query.trim()) return [];
     const [embedding] = await this.aiProvider.embedMany([query]);
-    return this.repo.similaritySearch({
+    const chunks = await this.repo.similaritySearch({
       workspaceId: opts.workspaceId,
       queryEmbedding: embedding,
       sourceKind: 'plane_work_item',
       spaceIds,
       topK: limit * OVERSAMPLE,
+    });
+
+    return chunks.filter((chunk) => {
+      const projectId = (chunk.metadata as { projectId?: unknown } | null)
+        ?.projectId;
+      // A chunk that cannot say which project it belongs to cannot be
+      // authorised, so it is dropped rather than shown.
+      return typeof projectId === 'string' && readableProjects.has(projectId);
     });
   }
 }
