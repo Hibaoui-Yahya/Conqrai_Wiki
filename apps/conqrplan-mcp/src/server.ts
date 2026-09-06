@@ -161,17 +161,40 @@ export class ConqrPlanMcpApp {
     );
 
     const startedAt = Date.now();
-    const result = await tool.handler(parsed.data, { client: this.client, call });
-    this.logger.info('tool call', {
+    // Identifiers, never content: a log line must not become a second copy of
+    // the data the permission checks just gated.
+    const trace = {
       tool: tool.name,
-      // Identifiers, never content: a log line must not become a second copy
-      // of the data the permission checks just gated.
+      service: this.opts.config.deployment.serviceName,
+      // Who called, taken from the verified assertion rather than from any
+      // header a caller could set.
+      caller: identity.assertion.claims.iss,
       personUid: identity.personUid,
       orgUid: identity.orgUid,
       correlationId: identity.correlationId,
-      durationMs: Date.now() - startedAt,
-    });
-    return result;
+      // Distinct on purpose - see callContextFor.
+      assertionJti: identity.assertion.claims.jti,
+      delegationJti: call.delegationJti,
+    };
+    try {
+      const result = await tool.handler(parsed.data, { client: this.client, call });
+      this.logger.info('tool call', {
+        ...trace,
+        outcome: 'ok',
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (err) {
+      // A handler that throws produced no line at all before, so a failing
+      // tool was invisible in exactly the situation the trace is for.
+      this.logger.warn('tool call', {
+        ...trace,
+        outcome: 'error',
+        error: (err as Error).name,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
   }
 }
 
