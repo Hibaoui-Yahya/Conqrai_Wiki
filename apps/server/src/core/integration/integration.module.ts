@@ -31,6 +31,7 @@ import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { IntegrationEventBus } from './services/integration-event-bus';
 import { CrossProductInsightService } from './services/cross-product-insight.service';
 import { DelegatedTokenService } from './services/delegated-token.service';
+import { ConqrPlanToolRouter } from './services/conqrplan-tool-router.service';
 import { PagePromotionService } from './services/page-promotion.service';
 
 /**
@@ -73,6 +74,7 @@ import { PagePromotionService } from './services/page-promotion.service';
     IntegrationEventBus,
     CrossProductInsightService,
     DelegatedTokenService,
+    ConqrPlanToolRouter,
     PagePromotionService,
   ],
   exports: [
@@ -90,6 +92,7 @@ import { PagePromotionService } from './services/page-promotion.service';
     DeliveryReadService,
     CrossProductInsightService,
     DelegatedTokenService,
+    ConqrPlanToolRouter,
   ],
 })
 export class IntegrationModule {}

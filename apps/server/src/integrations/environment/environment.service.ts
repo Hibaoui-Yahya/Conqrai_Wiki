@@ -474,6 +474,60 @@ export class EnvironmentService {
   }
 
   /** Shared secret used to verify Plane webhook HMAC-SHA256 signatures. */
+  // -- ConqrPlan MCP routing -------------------------------------------------
+  //
+  // Empty URL or empty routed-tool list means every tool stays local, so
+  // deploying the service changes nothing until a route is turned on.
+
+  /** Base URL of the extracted ConqrPlan MCP service. Empty disables routing. */
+  getConqrPlanMcpUrl(): string {
+    return this.configService.get<string>('CONQRPLAN_MCP_URL', '');
+  }
+
+  /** Tool names routed to the MCP service. `*` routes all seventeen. */
+  getConqrPlanMcpRoutedTools(): string[] {
+    return this.configService
+      .get<string>('CONQRPLAN_MCP_ROUTED_TOOLS', '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /** Bearer token identifying Hub to the MCP service. */
+  getConqrPlanMcpClientToken(): string {
+    return this.configService.get<string>('CONQRPLAN_MCP_CLIENT_TOKEN', '');
+  }
+
+  getConqrPlanMcpTimeoutMs(): number {
+    return Number(this.configService.get<string>('CONQRPLAN_MCP_TIMEOUT_MS', '30000'));
+  }
+
+  /**
+   * Life of an assertion Hub issues to the MCP service.
+   *
+   * Short, and it caps everything derived from it: the service may not mint a
+   * ConqrPlan token that outlives the assertion it came from.
+   */
+  getConqrPlanMcpAssertionTtlSeconds(): number {
+    return Number(
+      this.configService.get<string>('CONQRPLAN_MCP_ASSERTION_TTL_SECONDS', '120'),
+    );
+  }
+
+  /** Hub's Ed25519 private key for service assertions (PKCS#8 PEM). */
+  getConqrHubAssertionPrivateKey(): string {
+    return this.configService.get<string>('CONQRHUB_ASSERTION_PRIVATE_KEY_PEM', '');
+  }
+
+  /** Key id the MCP service registers Hub's public key under. */
+  getConqrHubAssertionKeyId(): string {
+    return this.configService.get<string>('CONQRHUB_ASSERTION_KEY_ID', '');
+  }
+
+  getConqrOboIssuer(): string {
+    return this.configService.get<string>('CONQR_OBO_ISSUER', 'conqrhub');
+  }
+
   getPlaneWebhookSecret(): string {
     return this.configService.get<string>('PLANE_WEBHOOK_SECRET', '');
   }
