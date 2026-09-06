@@ -625,3 +625,71 @@ export const CONQRPLAN_TOOLS: ToolDefinition[] = [
 ];
 
 export const CONQRPLAN_TOOL_NAMES = CONQRPLAN_TOOLS.map((t) => t.name);
+
+/** Scopes that let a tool change something in ConqrPlan. */
+const WRITE_SCOPES: string[] = [
+  DELEGATED_SCOPES.workItemCreate,
+  DELEGATED_SCOPES.workItemUpdate,
+  DELEGATED_SCOPES.workItemBulkCreate,
+  DELEGATED_SCOPES.estimateConfigure,
+  DELEGATED_SCOPES.cycleAssign,
+  DELEGATED_SCOPES.moduleAssign,
+];
+
+/**
+ * Whether a tool can change anything.
+ *
+ * Derived from the scopes it declares rather than a hand-kept list, so a tool
+ * that gains a write scope cannot keep being treated as a read. Getting this
+ * wrong in that direction is what would let an uncertain write be retried.
+ */
+export function isMutatingTool(toolName: string): boolean {
+  const tool = CONQRPLAN_TOOLS.find((t) => t.name === toolName);
+  if (!tool) return true; // unknown: assume the dangerous case
+  return tool.scopes.some((s) => WRITE_SCOPES.includes(s));
+}
+
+/** Scopes a tool needs, for minting a downstream delegation. */
+export function scopesForTool(toolName: string): string[] {
+  return CONQRPLAN_TOOLS.find((t) => t.name === toolName)?.scopes ?? [];
+}
+
+/**
+ * Refusals the MCP service raises *before* a tool handler runs.
+ *
+ * Everything here happens in authentication, tenant resolution, argument
+ * validation or rate limiting - all of which precede any call to ConqrPlan.
+ * So they prove nothing was written, which is what makes them safe to treat
+ * as a definite outcome.
+ *
+ * Any other 4xx is deliberately NOT on this list. "The server said 400" is
+ * not evidence about whether a write landed, and assuming it is would be how
+ * a duplicate gets created.
+ */
+export const PRE_DISPATCH_REFUSALS: ReadonlySet<string> = new Set([
+  'client_unauthenticated',
+  'unknown_tool',
+  'invalid_arguments',
+  'rate_limited',
+  'tenant_unmapped',
+  'project_not_approved',
+  'delegation_missing',
+  'delegation_malformed',
+  'delegation_bad_type',
+  'delegation_bad_algorithm',
+  'delegation_not_obo',
+  'delegation_wrong_issuer',
+  'delegation_wrong_audience',
+  'delegation_bad_signature',
+  'delegation_missing_kid',
+  'delegation_unknown_key',
+  'delegation_bad_key',
+  'delegation_expired',
+  'delegation_not_yet_valid',
+  'delegation_bad_subject',
+  'delegation_bad_tenant',
+  'delegation_missing_jti',
+  'delegation_bad_scope',
+  'delegation_scope_not_permitted',
+  'delegation_insufficient_scope',
+]);

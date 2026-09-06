@@ -1,21 +1,24 @@
 import { generateKeyPairSync } from 'node:crypto';
 import {
   ConqrPlanToolRouter,
+  RoutingUnavailableError,
   UncertainMutationError,
 } from './conqrplan-tool-router.service';
 
 /**
- * The router decides which implementation answers for a ConqrPlan tool during
- * the migration. The dangerous mistakes it exists to prevent are a mutation
- * reaching both implementations, and a mutation whose outcome is unknown being
- * quietly retried somewhere else.
+ * The router decides which implementation answers for a ConqrPlan tool.
+ *
+ * The mistakes it exists to prevent: a mutation reaching both
+ * implementations, a mutation whose outcome is unknown being retried
+ * somewhere else, and a broken remote configuration quietly running locally
+ * while an operator believes traffic moved.
  */
 
 const hub = generateKeyPairSync('ed25519');
 const PRIVATE_PEM = hub.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
 
 function makeRouter(env: Record<string, string> = {}) {
-  const values: Record<string, string> = {
+  const v: Record<string, string> = {
     CONQRPLAN_MCP_URL: 'https://mcp.test',
     CONQRPLAN_MCP_ROUTED_TOOLS: '',
     CONQRPLAN_MCP_CLIENT_TOKEN: 'client-token',
@@ -27,157 +30,210 @@ function makeRouter(env: Record<string, string> = {}) {
     ...env,
   };
   const environment = {
-    getConqrPlanMcpUrl: () => values.CONQRPLAN_MCP_URL,
+    getConqrPlanMcpUrl: () => v.CONQRPLAN_MCP_URL,
     getConqrPlanMcpRoutedTools: () =>
-      values.CONQRPLAN_MCP_ROUTED_TOOLS.split(',').map((s) => s.trim()).filter(Boolean),
-    getConqrPlanMcpClientToken: () => values.CONQRPLAN_MCP_CLIENT_TOKEN,
-    getConqrPlanMcpTimeoutMs: () => Number(values.CONQRPLAN_MCP_TIMEOUT_MS),
-    getConqrPlanMcpAssertionTtlSeconds: () =>
-      Number(values.CONQRPLAN_MCP_ASSERTION_TTL_SECONDS),
-    getConqrHubAssertionPrivateKey: () => values.CONQRHUB_ASSERTION_PRIVATE_KEY_PEM,
-    getConqrHubAssertionKeyId: () => values.CONQRHUB_ASSERTION_KEY_ID,
-    getConqrOboIssuer: () => values.CONQR_OBO_ISSUER,
+      v.CONQRPLAN_MCP_ROUTED_TOOLS.split(',').map((s) => s.trim()).filter(Boolean),
+    getConqrPlanMcpClientToken: () => v.CONQRPLAN_MCP_CLIENT_TOKEN,
+    getConqrPlanMcpTimeoutMs: () => Number(v.CONQRPLAN_MCP_TIMEOUT_MS),
+    getConqrPlanMcpAssertionTtlSeconds: () => Number(v.CONQRPLAN_MCP_ASSERTION_TTL_SECONDS),
+    getConqrHubAssertionPrivateKey: () => v.CONQRHUB_ASSERTION_PRIVATE_KEY_PEM,
+    getConqrHubAssertionKeyId: () => v.CONQRHUB_ASSERTION_KEY_ID,
+    getConqrOboIssuer: () => v.CONQR_OBO_ISSUER,
   };
   return new ConqrPlanToolRouter(environment as any);
 }
 
-const call = {
+const create = {
   toolName: 'create_work_item',
   args: { projectId: 'p', name: 'x' },
   personUid: 'conqr:person:aaaa',
   orgUid: 'conqr:org:bbbb',
-  scopes: ['work-item:create'],
-  mutating: true,
   idempotencyKey: 'req:page#block|project:p',
 };
+const read = { ...create, toolName: 'get_work_item' };
 
-describe('ConqrPlanToolRouter — routing', () => {
-  it('keeps every tool local by default', () => {
-    // Deploying the service must change nothing until a route is turned on.
+function reply(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status }) as any;
+}
+
+describe('ConqrPlanToolRouter — routing decisions', () => {
+  it('keeps every tool local until one is listed', () => {
     const router = makeRouter();
     expect(router.routeFor('create_work_item')).toBe('local');
-    expect(router.isRoutingAnything()).toBe(false);
   });
 
   it('routes only the named tools', () => {
-    const router = makeRouter({ CONQRPLAN_MCP_ROUTED_TOOLS: 'get_work_item,search_work_items' });
+    const router = makeRouter({ CONQRPLAN_MCP_ROUTED_TOOLS: 'get_work_item' });
     expect(router.routeFor('get_work_item')).toBe('mcp');
     expect(router.routeFor('create_work_item')).toBe('local');
   });
 
-  it('routes everything on the wildcard', () => {
+  it('never routes a tool it does not own', () => {
+    // Composite and Hub-only tools keep their existing ownership even under
+    // the wildcard.
     const router = makeRouter({ CONQRPLAN_MCP_ROUTED_TOOLS: '*' });
+    expect(router.routeFor('create_work_item_from_page')).toBe('local');
+    expect(router.routeFor('create_page')).toBe('local');
     expect(router.routeFor('bulk_create_work_items')).toBe('mcp');
-  });
-
-  it('stays local when no service URL is configured, whatever is listed', () => {
-    // Rollback by clearing the URL must be total, not partial.
-    const router = makeRouter({ CONQRPLAN_MCP_URL: '', CONQRPLAN_MCP_ROUTED_TOOLS: '*' });
-    expect(router.routeFor('get_work_item')).toBe('local');
   });
 });
 
-describe('ConqrPlanToolRouter — uncertain mutations', () => {
+describe('ConqrPlanToolRouter — broken remote configuration', () => {
+  it('does not silently fall back to local when the URL is missing', async () => {
+    // The failure an operator must see, rather than believing traffic moved.
+    const router = makeRouter({
+      CONQRPLAN_MCP_URL: '',
+      CONQRPLAN_MCP_ROUTED_TOOLS: '*',
+    });
+    await expect(router.callRemote(read)).rejects.toBeInstanceOf(RoutingUnavailableError);
+  });
+
+  it('rejects a malformed service URL', async () => {
+    const router = makeRouter({ CONQRPLAN_MCP_URL: 'not a url' });
+    await expect(router.callRemote(read)).rejects.toThrow(/not a valid URL/);
+  });
+
+  it('rejects a non-http service URL', async () => {
+    const router = makeRouter({ CONQRPLAN_MCP_URL: 'file:///etc/passwd' });
+    await expect(router.callRemote(read)).rejects.toThrow(/not http/);
+  });
+
+  it('fails at boot when tools are routed but the service is unconfigured', () => {
+    const router = makeRouter({
+      CONQRPLAN_MCP_URL: '',
+      CONQRPLAN_MCP_ROUTED_TOOLS: 'get_work_item',
+    });
+    expect(() => router.assertConfigurationCoherent()).toThrow(/no service URL/);
+  });
+
+  it('is coherent when nothing is routed', () => {
+    expect(() =>
+      makeRouter({ CONQRPLAN_MCP_URL: '' }).assertConfigurationCoherent(),
+    ).not.toThrow();
+  });
+});
+
+describe('ConqrPlanToolRouter — outcome classification', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it('reports a timed-out mutation as uncertain, naming the idempotency key', async () => {
+  it('treats a refusal raised before the tool ran as definite', async () => {
+    for (const classification of [
+      'client_unauthenticated',
+      'invalid_arguments',
+      'tenant_unmapped',
+      'project_not_approved',
+      'delegation_expired',
+      'rate_limited',
+    ]) {
+      jest.spyOn(global, 'fetch').mockResolvedValue(reply({ error: classification }, 403));
+      const err: any = await makeRouter().callRemote(create).catch((e: any) => e);
+      expect(err).not.toBeInstanceOf(UncertainMutationError);
+      expect(err.message).toMatch(/nothing was applied/);
+    }
+  });
+
+  it('treats an unrecognised 4xx on a mutation as uncertain', async () => {
+    // "The server said 400" is not evidence about whether a write landed.
+    jest.spyOn(global, 'fetch').mockResolvedValue(reply({ error: 'something_new' }, 409));
+    await expect(makeRouter().callRemote(create)).rejects.toBeInstanceOf(
+      UncertainMutationError,
+    );
+  });
+
+  it('treats a 5xx on a mutation as uncertain', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(reply({ error: 'internal_error' }, 502));
+    await expect(makeRouter().callRemote(create)).rejects.toBeInstanceOf(
+      UncertainMutationError,
+    );
+  });
+
+  it('names the idempotency key so the write can be resolved by reading back', async () => {
     jest.spyOn(global, 'fetch').mockImplementation(() => {
       const err = new Error('aborted');
       err.name = 'AbortError';
       return Promise.reject(err);
     });
-
-    await expect(makeRouter().callRemote(call)).rejects.toBeInstanceOf(
-      UncertainMutationError,
-    );
-    // Substring, not a regex: the key contains characters a pattern would
-    // have to escape, and the point is that the operator sees it verbatim.
-    await expect(makeRouter().callRemote(call)).rejects.toThrow(
+    await expect(makeRouter().callRemote(create)).rejects.toThrow(
       'reading back external_id req:page#block|project:p',
     );
   });
 
-  it('reports a 5xx on a mutation as uncertain rather than failed', async () => {
-    jest
-      .spyOn(global, 'fetch')
-      .mockResolvedValue(new Response('boom', { status: 502 }) as any);
-    await expect(makeRouter().callRemote(call)).rejects.toBeInstanceOf(
-      UncertainMutationError,
-    );
-  });
-
-  it('treats a refusal as a definite outcome, not an uncertain one', async () => {
-    // 4xx means nothing was applied, so it is an ordinary error and the caller
-    // may act on it without reading anything back.
-    jest
-      .spyOn(global, 'fetch')
-      .mockResolvedValue(new Response('nope', { status: 403 }) as any);
-    const err: any = await makeRouter().callRemote(call).catch((e: any) => e);
+  it('does not classify a failed read as uncertain', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(reply({ error: 'internal_error' }, 502));
+    const err: any = await makeRouter().callRemote(read).catch((e: any) => e);
     expect(err).not.toBeInstanceOf(UncertainMutationError);
-    expect(err.message).toMatch(/refused/);
   });
 
-  it('does not treat a failed read as uncertain', async () => {
-    jest.spyOn(global, 'fetch').mockImplementation(() => {
-      const err = new Error('aborted');
-      err.name = 'AbortError';
-      return Promise.reject(err);
-    });
+  it('derives mutating from declared scopes, not a hand-kept list', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(reply({ error: 'internal_error' }, 502));
+    // Declares estimate:configure, so it must be treated as a write.
+    await expect(
+      makeRouter().callRemote({ ...create, toolName: 'activate_estimate_system' }),
+    ).rejects.toBeInstanceOf(UncertainMutationError);
+    // Declares only estimate:read.
     const err: any = await makeRouter()
-      .callRemote({ ...call, toolName: 'get_work_item', mutating: false })
+      .callRemote({ ...create, toolName: 'get_estimate_system' })
       .catch((e: any) => e);
     expect(err).not.toBeInstanceOf(UncertainMutationError);
+  });
+
+  it('returns a partial write verbatim rather than treating it as a failure', async () => {
+    // A 200 carries the tool's own outcome; a partial write is definite and
+    // must reach the caller exactly as the local implementation reports it.
+    const partial = {
+      id: 'wi-1',
+      partialFailures: [{ field: 'cycleId', error: 'ConqrPlan request failed (403)' }],
+    };
+    jest.spyOn(global, 'fetch').mockResolvedValue(
+      reply({ result: { content: [{ text: JSON.stringify(partial) }] } }),
+    );
+    expect(await makeRouter().callRemote(create)).toEqual(partial);
+  });
+
+  it('returns bulk per-item results verbatim', async () => {
+    const bulk = {
+      requested: 2,
+      created: 1,
+      failed: 1,
+      results: [
+        { index: 0, status: 'created', workItemId: 'a' },
+        { index: 1, status: 'failed', error: 'boom' },
+      ],
+    };
+    jest.spyOn(global, 'fetch').mockResolvedValue(
+      reply({ result: { content: [{ text: JSON.stringify(bulk) }] } }),
+    );
+    expect(
+      await makeRouter().callRemote({ ...create, toolName: 'bulk_create_work_items' }),
+    ).toEqual(bulk);
   });
 });
 
 describe('ConqrPlanToolRouter — assertion', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it('signs an Ed25519 assertion addressed to the MCP service', async () => {
+  it('signs an Ed25519 assertion addressed to the service, with the tool scopes', async () => {
     let captured: any;
-    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init: any) => {
+    jest.spyOn(global, 'fetch').mockImplementation(async (_u, init: any) => {
       captured = init;
-      return new Response(
-        JSON.stringify({ result: { content: [{ text: '{"ok":true}' }] } }),
-        { status: 200 },
-      ) as any;
+      return reply({ result: { content: [{ text: 'null' }] } });
     });
 
-    const result = await makeRouter().callRemote({ ...call, mutating: false });
-    expect(result).toEqual({ ok: true });
-
-    const token = captured.headers['X-Conqr-Delegation'];
-    const [header, payload] = token
+    await makeRouter().callRemote(read);
+    const [header, payload] = captured.headers['X-Conqr-Delegation']
       .split('.')
       .slice(0, 2)
       .map((p: string) => JSON.parse(Buffer.from(p, 'base64url').toString('utf8')));
 
     expect(header.alg).toBe('EdDSA');
     expect(header.kid).toBe('hub-2026-09');
-    // Addressed to the service, not to ConqrPlan: Hub cannot mint a token
-    // ConqrPlan will accept, which is the point of the split.
+    // Addressed to the service. Hub cannot mint a ConqrPlan-addressed token at
+    // all, which is what keeps each issuer's compromise attributable.
     expect(payload.aud).toBe('conqrplan-mcp');
-    expect(payload.sub).toBe(call.personUid);
-    expect(payload.tid).toBe(call.orgUid);
-    expect(payload.scope).toEqual(['work-item:create']);
-    expect(captured.headers.Authorization).toBe('Bearer client-token');
-  });
-
-  it('keeps the assertion short-lived', async () => {
-    let captured: any;
-    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init: any) => {
-      captured = init;
-      return new Response(
-        JSON.stringify({ result: { content: [{ text: 'null' }] } }),
-        { status: 200 },
-      ) as any;
-    });
-    await makeRouter().callRemote({ ...call, mutating: false });
-    const payload = JSON.parse(
-      Buffer.from(captured.headers['X-Conqr-Delegation'].split('.')[1], 'base64url').toString(
-        'utf8',
-      ),
-    );
+    expect(payload.sub).toBe(read.personUid);
+    expect(payload.scope).toEqual(['work-item:read']);
     expect(payload.exp - payload.iat).toBe(120);
+    expect(captured.headers.Authorization).toBe('Bearer client-token');
+    expect(captured.headers['X-Conqr-Correlation-Id']).toBeTruthy();
   });
 });

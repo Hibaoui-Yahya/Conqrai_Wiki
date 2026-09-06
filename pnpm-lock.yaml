@@ -537,6 +537,9 @@ importers:
       '@clickhouse/client':
         specifier: ^1.18.2
         version: 1.18.2
+      '@conqr/conqrplan-core':
+        specifier: workspace:*
+        version: link:../../packages/conqrplan-core
       '@fastify/cookie':
         specifier: ^11.0.2
         version: 11.0.2

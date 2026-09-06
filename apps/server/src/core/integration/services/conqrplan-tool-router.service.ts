@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createPrivateKey, randomUUID, sign as edSign } from 'node:crypto';
+import {
+  isMutatingTool,
+  PRE_DISPATCH_REFUSALS,
+  scopesForTool,
+} from '@conqr/conqrplan-core';
 import { EnvironmentService } from '../../../integrations/environment/environment.service';
 
 /**
@@ -9,26 +14,19 @@ import { EnvironmentService } from '../../../integrations/environment/environmen
  * implementation that has always run inside Hub, and the extracted MCP
  * service. This decides which one answers, per tool, from configuration.
  *
- * Two rules make that safe, and they are the reason this is a router rather
- * than a client with a fallback.
- *
- * **One mutation reaches exactly one implementation.** There is no failover.
- * If the remote call fails in a way that leaves the outcome unknown - a
- * timeout, a dropped connection - retrying it against the local path would
- * risk creating the work item twice, and the caller would have no way to tell.
- * The error is surfaced with the idempotency key instead, so the write can be
- * resolved by reading it back rather than by guessing.
- *
- * **The idempotency key does not depend on the route.** It is derived from the
- * request, so the same logical write carries the same key whether it goes
- * local or remote, and a retry after a routing change still collides with the
- * original rather than duplicating it.
+ * Routing mode is explicit. "Local" is a choice, not what happens when the
+ * remote configuration is wrong: a tool listed for remote execution whose
+ * service is unconfigured reports unavailable rather than quietly running
+ * locally. Silently reverting would mean an operator who fat-fingered a URL
+ * believes traffic moved when it never left, and a rollback nobody performed
+ * looks identical to one that worked.
  */
 
 export type ToolRoute = 'local' | 'mcp';
 
 /** Raised when a routed mutation's outcome could not be established. */
 export class UncertainMutationError extends Error {
+  readonly uncertain = true;
   constructor(
     readonly toolName: string,
     readonly idempotencyKey: string | undefined,
@@ -38,9 +36,17 @@ export class UncertainMutationError extends Error {
       `ConqrPlan tool ${toolName} did not report an outcome (${cause}). ` +
         (idempotencyKey
           ? `Resolve by reading back external_id ${idempotencyKey} before retrying.`
-          : 'Read the work item back before retrying.'),
+          : 'Read the work item back before retrying; do not create it again.'),
     );
     this.name = 'UncertainMutationError';
+  }
+}
+
+/** Raised when a tool is configured for remote execution but cannot reach it. */
+export class RoutingUnavailableError extends Error {
+  constructor(toolName: string, reason: string) {
+    super(`ConqrPlan tool ${toolName} is routed to the MCP service but ${reason}`);
+    this.name = 'RoutingUnavailableError';
   }
 }
 
@@ -50,37 +56,66 @@ export class ConqrPlanToolRouter {
 
   constructor(private readonly environment: EnvironmentService) {}
 
+  /** Tools this router may take over. Everything else stays where it is. */
+  isRoutable(toolName: string): boolean {
+    return scopesForTool(toolName).length > 0;
+  }
+
   /**
    * Which implementation answers for a tool.
    *
-   * Precedence, most specific first: an explicit per-tool list, then the
-   * service-wide default, then local. Local is the default everywhere so that
-   * deploying the service changes nothing until a route is turned on
-   * deliberately - and so rollback is removing a name from a list.
+   * Precedence: an explicit per-tool list, then the wildcard, then local. A
+   * name only reaches 'mcp' by being listed, so deploying the service changes
+   * nothing until someone opts a tool in, and removing the name is the whole
+   * of the rollback for subsequent requests.
    */
   routeFor(toolName: string): ToolRoute {
-    if (!this.environment.getConqrPlanMcpUrl()) return 'local';
+    if (!this.isRoutable(toolName)) return 'local';
     const routed = this.environment.getConqrPlanMcpRoutedTools();
-    if (routed.includes('*')) return 'mcp';
-    return routed.includes(toolName) ? 'mcp' : 'local';
-  }
-
-  /** True when any route is active, for health reporting. */
-  isRoutingAnything(): boolean {
-    return Boolean(
-      this.environment.getConqrPlanMcpUrl() &&
-        this.environment.getConqrPlanMcpRoutedTools().length,
-    );
+    if (routed.includes('*') || routed.includes(toolName)) return 'mcp';
+    return 'local';
   }
 
   /**
-   * Issue an assertion naming the human, addressed to the MCP service.
+   * Why a remote route cannot be served, or null when it can.
    *
-   * Hub signs with its own Ed25519 private key; the MCP service holds only the
-   * public half. Nothing here can mint a ConqrPlan-addressed token - that is
-   * the service's job with its own key, and keeping the two separate is what
-   * makes each issuer's compromise attributable to it.
+   * Checked before dispatch so a misconfiguration is a clear error rather than
+   * a silent downgrade.
    */
+  private unavailableReason(): string | null {
+    const url = this.environment.getConqrPlanMcpUrl();
+    if (!url) return 'no service URL is configured (CONQRPLAN_MCP_URL)';
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/.test(parsed.protocol)) return `the service URL is not http(s): ${url}`;
+    } catch {
+      return `the service URL is not a valid URL: ${url}`;
+    }
+    if (!this.environment.getConqrPlanMcpClientToken()) {
+      return 'no client token is configured (CONQRPLAN_MCP_CLIENT_TOKEN)';
+    }
+    if (!this.environment.getConqrHubAssertionPrivateKey()) {
+      return 'no assertion signing key is configured (CONQRHUB_ASSERTION_PRIVATE_KEY_PEM)';
+    }
+    if (!this.environment.getConqrHubAssertionKeyId()) {
+      return 'no assertion key id is configured (CONQRHUB_ASSERTION_KEY_ID)';
+    }
+    return null;
+  }
+
+  /** Validate routing configuration once, at boot, so it fails loudly. */
+  assertConfigurationCoherent(): void {
+    const routed = this.environment.getConqrPlanMcpRoutedTools();
+    if (!routed.length) return;
+    const reason = this.unavailableReason();
+    if (reason) {
+      throw new Error(
+        `ConqrPlan MCP routing lists ${routed.join(', ')} but ${reason}. ` +
+          'Fix the configuration or clear CONQRPLAN_MCP_ROUTED_TOOLS to run locally.',
+      );
+    }
+  }
+
   private assertionFor(
     personUid: string,
     orgUid: string,
@@ -125,87 +160,110 @@ export class ConqrPlanToolRouter {
   /**
    * Invoke a tool on the MCP service.
    *
-   * A transport failure on a mutation is reported as uncertain rather than
-   * retried anywhere: the request may or may not have been applied, and only
-   * reading it back can tell.
+   * Outcome classification is the part that matters. A refusal the service
+   * raised before running the tool proves nothing was written; anything else
+   * on a mutation is uncertain and is reported as such, with the idempotency
+   * key, so the caller resolves it by reading back rather than by creating a
+   * second time. There is no failover: retrying the other implementation is
+   * exactly how a duplicate gets made.
    */
   async callRemote(params: {
     toolName: string;
     args: Record<string, unknown>;
     personUid: string;
     orgUid: string;
-    scopes: string[];
-    mutating: boolean;
+    correlationId?: string;
     idempotencyKey?: string;
   }): Promise<unknown> {
-    const url = this.environment.getConqrPlanMcpUrl();
-    if (!url) throw new Error('ConqrPlan MCP routing is not configured');
+    const reason = this.unavailableReason();
+    if (reason) throw new RoutingUnavailableError(params.toolName, reason);
 
+    const mutating = isMutatingTool(params.toolName);
+    const scopes = scopesForTool(params.toolName);
     const { token, jti } = this.assertionFor(
       params.personUid,
       params.orgUid,
-      params.scopes,
+      scopes,
       this.environment.getConqrPlanMcpAssertionTtlSeconds(),
     );
+    const correlationId = params.correlationId ?? jti;
 
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
       this.environment.getConqrPlanMcpTimeoutMs(),
     );
+
+    let res: Response;
     try {
-      const res = await fetch(`${url.replace(/\/$/, '')}/mcp`, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.environment.getConqrPlanMcpClientToken()}`,
-          'X-Conqr-Delegation': token,
-          'X-Conqr-Correlation-Id': jti,
+      res = await fetch(
+        `${this.environment.getConqrPlanMcpUrl().replace(/\/$/, '')}/mcp`,
+        {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.environment.getConqrPlanMcpClientToken()}`,
+            'X-Conqr-Delegation': token,
+            'X-Conqr-Correlation-Id': correlationId,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: correlationId,
+            method: 'tools/call',
+            params: { name: params.toolName, arguments: params.args },
+          }),
         },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: jti,
-          method: 'tools/call',
-          params: { name: params.toolName, arguments: params.args },
-        }),
-      });
-
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        // A refusal is a definite outcome: nothing was applied, so it is an
-        // ordinary error rather than an uncertain write.
-        if (res.status >= 400 && res.status < 500) {
-          throw new Error(`ConqrPlan MCP refused ${params.toolName}: ${res.status} ${body}`);
-        }
-        if (params.mutating) {
-          throw new UncertainMutationError(
-            params.toolName,
-            params.idempotencyKey,
-            `HTTP ${res.status}`,
-          );
-        }
-        throw new Error(`ConqrPlan MCP failed ${params.toolName}: ${res.status} ${body}`);
-      }
-
-      const payload = (await res.json()) as {
-        result?: { content?: { text?: string }[] };
-      };
-      const text = payload.result?.content?.[0]?.text;
-      return text ? JSON.parse(text) : undefined;
+      );
     } catch (err) {
-      if (err instanceof UncertainMutationError) throw err;
+      // The request left; we do not know whether it was applied.
       const aborted = (err as Error)?.name === 'AbortError';
-      if (params.mutating && (aborted || err instanceof TypeError)) {
+      if (mutating) {
         throw new UncertainMutationError(
           params.toolName,
           params.idempotencyKey,
-          aborted ? 'timeout' : 'connection failed',
+          aborted ? 'timeout' : `transport failure: ${(err as Error).message}`,
         );
       }
       throw err;
     } finally {
       clearTimeout(timer);
     }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      let classification: string | undefined;
+      try {
+        classification = JSON.parse(body)?.error;
+      } catch {
+        /* body is not JSON */
+      }
+
+      // Only a refusal we know happens before the tool runs proves no write.
+      if (classification && PRE_DISPATCH_REFUSALS.has(classification)) {
+        throw new Error(
+          `ConqrPlan MCP refused ${params.toolName} (${classification}); nothing was applied`,
+        );
+      }
+      if (mutating) {
+        throw new UncertainMutationError(
+          params.toolName,
+          params.idempotencyKey,
+          `HTTP ${res.status}${classification ? ` ${classification}` : ''}`,
+        );
+      }
+      throw new Error(`ConqrPlan MCP failed ${params.toolName}: ${res.status} ${body}`);
+    }
+
+    // A 200 carries the tool's own structured outcome: success, a ConqrPlan
+    // refusal, a partial write with per-field errors, or per-item bulk
+    // results. All of those are definite and are returned verbatim so the
+    // caller sees exactly what the local implementation would have returned.
+    const payload = (await res.json()) as { result?: { content?: { text?: string }[] } };
+    const text = payload.result?.content?.[0]?.text;
+    this.logger.debug(
+      `Routed ${params.toolName} to MCP (correlationId ${correlationId})`,
+    );
+    return text ? JSON.parse(text) : undefined;
   }
 }
